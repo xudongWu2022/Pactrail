@@ -1,0 +1,14 @@
+{
+  "id": "duplicate-request-id-is-idempotent",
+  "description": "A client retry reuses the original gateway decision and cannot create a second budget hold.",
+  "policy": {"rails": ["llm_token"], "budgets": {"research": 5.0}, "max_amount": 5.0},
+  "steps": [
+    {"action": "guard", "request_id": "chat-001", "request": {"agent": "research-bot", "rail": "llm_token", "amount": 3.0, "budget": "research", "provider": "openai", "service": "gpt-4.1-mini"}, "expect": {"decision": "allow", "reservation_status": "active"}},
+    {"action": "guard", "request_id": "chat-001", "request": {"agent": "research-bot", "rail": "llm_token", "amount": 3.0, "budget": "research", "provider": "openai", "service": "gpt-4.1-mini"}, "expect": {"decision": "allow", "reservation_status": "active"}}
+  ],
+  "expect": {
+    "ledger": {"event_count": 0, "total": 0.0},
+    "gateway": {"allow_count": 1, "deny_count": 0, "decision_count": 1, "reservations": {"active": {"count": 1, "amount": 3.0}}},
+    "requests": {"chat-001": {"decision": "allow", "reservation_status": "active"}}
+  }
+}

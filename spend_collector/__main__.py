@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -32,10 +33,16 @@ from .gateway import (
 )
 from .providers import llm_provider
 from .report import render
+from .scenarios import ScenarioError, render_report, run_scenarios
 from .store import SpendStore
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURES = _ROOT / "fixtures"
+DEFAULT_MAX_REQUEST_BYTES = 10 * 1024 * 1024
+
+
+class PayloadTooLarge(ValueError):
+    pass
 
 
 def _load_fixture(name: str):
@@ -438,7 +445,7 @@ def _finish_run(store: SpendStore, budgets: dict[str, float], out_dir: str | Pat
         print("Sent high-severity alerts to SPEND_ALERT_WEBHOOK")
 
 
-def demo(out_dir: str | Path = ".") -> None:
+def demo(out_dir: str | Path = ".", db_path: str | Path = "spend.db") -> None:
     """Run the product demo: LLM + x402 + USDC + Stripe -> ledger -> security signals."""
     llm = _load_fixture("llm_usage.json")
     x402 = _load_fixture("x402_settlements.json")
@@ -446,7 +453,7 @@ def demo(out_dir: str | Path = ".") -> None:
     stripe = _load_fixture("stripe_events.json")
     budgets = _load_budgets(_load_fixture("budgets.json"))
 
-    with SpendStore() as store:
+    with SpendStore(db_path) as store:
         store.ingest(from_llm_usage(llm))
         store.ingest(from_x402_settlements(x402))
         store.ingest(from_usdc_transfers(usdc))
@@ -483,6 +490,16 @@ def demo(out_dir: str | Path = ".") -> None:
     stripe_event = from_stripe_events([event])[0]
     assert stripe_event.billed_cost == 42.0 and stripe_event.rail == "card"
     print("[self-check] Stripe payment mapping -- OK")
+
+
+def demo_live(out_dir: str | Path = "artifacts-live", db_path: str | Path = "spend-demo.db",
+              policy_path: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
+    """Seed the fixture ledger, then serve its auto-refreshing dashboard."""
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    demo(out_path, db_path)
+    print(f"\nLive demo dashboard: http://{host}:{port}/dashboard")
+    gateway(db_path, policy_path, host, port)
 
 
 def pull(db_path: str | Path = "spend.db", out_dir: str | Path = ".", days: int = 7,
@@ -1047,16 +1064,26 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 on_body(raw)
             return raw
 
-        def _read_json(self) -> dict:
-            length = int(self.headers.get("content-length", "0"))
+        def _request_length(self, policy: dict) -> int:
+            try:
+                length = int(self.headers.get("content-length", "0") or 0)
+            except ValueError as exc:
+                raise ValueError("content-length must be an integer") from exc
+            max_bytes = int(policy.get("max_request_bytes", DEFAULT_MAX_REQUEST_BYTES))
+            if length > max_bytes:
+                raise PayloadTooLarge(f"request body {length} bytes exceeds max_request_bytes {max_bytes}")
+            return length
+
+        def _read_json(self, policy: dict) -> dict:
+            length = self._request_length(policy)
             self._raw_body = self.rfile.read(length)
             payload = json.loads(self._raw_body or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("request body must be a JSON object")
             return payload
 
-        def _read_raw(self) -> bytes:
-            length = int(self.headers.get("content-length", "0"))
+        def _read_raw(self, policy: dict) -> bytes:
+            length = self._request_length(policy)
             self._raw_body = self.rfile.read(length)
             return self._raw_body
 
@@ -1080,7 +1107,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             auth = self.headers.get("authorization", "")
             bearer = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
             supplied = token or bearer or self.headers.get("x-gateway-token", "")
-            return supplied in set(str(t) for t in tokens)
+            supplied = str(supplied)
+            return any(hmac.compare_digest(supplied, str(t)) for t in tokens)
 
         def _guard_request(self, payload: dict) -> GuardRequest:
             return GuardRequest(
@@ -1208,7 +1236,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if not route:
                 return False
             resource_id, resource = route
-            body = self._read_raw()
+            body = self._read_raw(policy)
             guard_payload = self._x402_guard_payload(resource_id, resource)
             content_reasons = inspect_content(body, policy)
             if content_reasons:
@@ -1459,7 +1487,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 policy = _load_policy(policy_path)
                 if self._handle_x402(policy):
                     return
-                payload = self._read_json()
+                payload = self._read_json(policy)
                 if not self._authorized(policy):
                     self._send(401, {"error": "unauthorized"})
                     return
@@ -1522,6 +1550,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 self._send(404, {"error": "not found"})
             except urllib.error.URLError as exc:
                 self._send(502, {"error": str(exc)})
+            except PayloadTooLarge as exc:
+                self._send(413, {"error": "payload_too_large", "detail": str(exc)})
             except (KeyError, TypeError, ValueError) as exc:
                 self._send(400, {"error": str(exc)})
 
@@ -1570,6 +1600,28 @@ def release_reservation_cmd(db_path: str, request_id: str) -> None:
     print(json.dumps({"request_id": request_id, "released": released}, indent=2, sort_keys=True))
 
 
+def run_scenarios_cmd(path: str | Path = "scenarios", out_dir: str | Path = "artifacts") -> dict:
+    """Run executable incident records and write a machine-readable report."""
+    try:
+        results = run_scenarios(path)
+    except ScenarioError as exc:
+        print(f"scenario error: {exc}")
+        sys.exit(1)
+    report = render_report(results)
+    destination = Path(out_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    report_path = destination / "scenario-report.json"
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"scenarios: {report['passed']} passed / {report['failed']} failed")
+    print(f"wrote {report_path}")
+    if report["failed"]:
+        for result in report["scenarios"]:
+            if not result["passed"]:
+                print(f"FAIL {result['id']}: {result['error']}")
+        sys.exit(1)
+    return report
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="spend-collector",
@@ -1581,7 +1633,15 @@ def _parser() -> argparse.ArgumentParser:
                         help="directory for report.html and JSON artifacts")
     sub = parser.add_subparsers(dest="cmd")
 
-    sub.add_parser("demo", parents=[common], help="run the fixture-backed product demo")
+    demo_p = sub.add_parser("demo", parents=[common], help="run the fixture-backed product demo")
+    demo_p.add_argument("--db", default="spend.db", help="SQLite ledger path")
+
+    demo_live_p = sub.add_parser("demo-live", parents=[common],
+                                 help="seed fixture data and serve the live dashboard")
+    demo_live_p.add_argument("--db", default="spend-demo.db", help="SQLite ledger path")
+    demo_live_p.add_argument("--policy", help="gateway policy JSON; defaults to SPEND_POLICY_FILE")
+    demo_live_p.add_argument("--host", default="127.0.0.1", help="bind host")
+    demo_live_p.add_argument("--port", type=int, default=8787, help="bind port")
 
     pull_p = sub.add_parser("pull", parents=[common], help="pull LLM cost rows (Anthropic or OpenAI)")
     pull_p.add_argument("--db", default="spend.db", help="SQLite ledger path")
@@ -1683,6 +1743,11 @@ def _parser() -> argparse.ArgumentParser:
     release_p.add_argument("--db", default="spend.db", help="SQLite ledger path")
     release_p.add_argument("--request-id", required=True, help="gateway request id")
 
+    scenarios_p = sub.add_parser("run-scenarios", parents=[common],
+                                 help="run JSON incident scenarios against an in-memory ledger")
+    scenarios_p.add_argument("--path", default="scenarios", help="scenario JSON file or directory")
+    scenarios_p.set_defaults(out_dir="artifacts")
+
     for name, verb in (("freeze", "freeze (deny all spend)"), ("unfreeze", "unfreeze")):
         fp = sub.add_parser(name, help=f"{verb} an agent/budget in the policy (kill-switch)")
         fp.add_argument("--policy", required=True, help="gateway policy JSON to edit")
@@ -1696,7 +1761,9 @@ def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     cmd = args.cmd or "demo"
     if cmd == "demo":
-        demo(args.out_dir)
+        demo(args.out_dir, args.db)
+    elif cmd == "demo-live":
+        demo_live(args.out_dir, args.db, args.policy, args.host, args.port)
     elif cmd == "pull":
         pull(args.db, args.out_dir, args.days, args.provider)
     elif cmd == "pull-openrouter":
@@ -1729,6 +1796,8 @@ def main(argv: list[str] | None = None) -> None:
         audit_config_cmd(args.policy, args.db, args.out_dir)
     elif cmd == "release-reservation":
         release_reservation_cmd(args.db, args.request_id)
+    elif cmd == "run-scenarios":
+        run_scenarios_cmd(args.path, args.out_dir)
     elif cmd == "freeze":
         freeze(args)
     elif cmd == "unfreeze":

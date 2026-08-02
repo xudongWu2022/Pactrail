@@ -1,0 +1,14 @@
+{
+  "id": "budget-cap-denies-before-payment",
+  "description": "Observed spend plus a new request over the budget is denied before a payment can start.",
+  "policy": {"rails": ["api_x402"], "budgets": {"research": 10.0}, "max_amount": 5.0},
+  "steps": [
+    {"action": "seed", "events": [{"event_id": "prior-spend-001", "event_time": "2026-07-01T00:00:00+00:00", "rail": "api_x402", "provider_name": "x402", "service_name": "/search", "billed_cost": 9.0, "billing_currency": "USDC", "consumed_quantity": 1, "pricing_unit": "call", "x_agent_id": "research-bot", "x_budget_id": "research", "x_source_event": "scenario:prior-spend"}]},
+    {"action": "guard", "request_id": "pay-002", "request": {"agent": "research-bot", "rail": "api_x402", "amount": 2.0, "budget": "research", "provider": "x402", "service": "/search"}, "expect": {"decision": "deny", "reservation_status": "none", "reason_contains": "would exceed cap"}}
+  ],
+  "expect": {
+    "ledger": {"event_count": 1, "total": 9.0},
+    "gateway": {"allow_count": 0, "deny_count": 1, "decision_count": 1, "reservations": {}},
+    "requests": {"pay-002": {"decision": "deny", "reservation_status": "none", "reason_contains": "would exceed cap"}}
+  }
+}

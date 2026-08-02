@@ -7,6 +7,7 @@ license = "MIT"
 requires-python = ">=3.10"
 authors = [
   { name = "Yitian Wu" },
+  { name = "Xudong Wu", email = "wxd.2022.11.04@gmail.com" },
 ]
 keywords = ["agent", "finops", "llm", "x402", "stripe", "security", "spend"]
 classifiers = [

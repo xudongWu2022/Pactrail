@@ -1,0 +1,29 @@
+{
+  "id": "payment-success-releases-hold",
+  "description": "A settled x402 payment is recorded once and its pre-spend hold is released.",
+  "policy": {
+    "rails": ["api_x402"],
+    "budgets": {"research": 10.0},
+    "max_amount": 5.0
+  },
+  "steps": [
+    {
+      "action": "guard",
+      "request_id": "pay-001",
+      "request": {"agent": "research-bot", "rail": "api_x402", "amount": 2.5, "budget": "research", "provider": "x402", "merchant": "0xmerchant", "service": "/search"},
+      "expect": {"decision": "allow", "reservation_status": "active"}
+    },
+    {
+      "action": "seed",
+      "events": [
+        {"event_id": "x402-settlement-001", "event_time": "2026-07-01T00:00:00+00:00", "rail": "api_x402", "provider_name": "x402", "service_name": "/search", "billed_cost": 2.5, "billing_currency": "USDC", "consumed_quantity": 1, "pricing_unit": "call", "x_agent_id": "research-bot", "x_budget_id": "research", "x_merchant_id": "0xmerchant", "x_receipt_ref": "tx:001", "x_source_event": "scenario:payment-success"}
+      ]
+    },
+    {"action": "release", "request_id": "pay-001"}
+  ],
+  "expect": {
+    "ledger": {"event_count": 1, "total": 2.5, "by_budget": {"research": 2.5}, "by_rail": {"api_x402": 2.5}},
+    "gateway": {"allow_count": 1, "deny_count": 0, "decision_count": 1, "reservations": {"released": {"count": 1, "amount": 2.5}}},
+    "requests": {"pay-001": {"decision": "allow", "reservation_status": "released"}}
+  }
+}

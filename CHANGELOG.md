@@ -13,6 +13,11 @@ Notable changes to this project. Loosely follows Keep a Changelog; versioning is
   always released once the call returns, so a stream without usage no longer leaves a
   reservation lingering to its TTL.
 
+### Testing
+- Added JSON-driven executable incident scenarios for gateway/ledger invariants.
+  The initial library covers successful payment release, duplicate request IDs,
+  budget denial before payment, and delivery-failure hold release.
+
 ## [0.1.0] — 2026-07-04
 
 First tagged release: a read-only, cross-rail agent-spend collector with a

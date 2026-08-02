@@ -277,10 +277,11 @@ def validate_policy(policy: dict) -> list[str]:
     errors: list[str] = []
     root_keys = {
         "agents_allowed", "rails", "budgets", "max_amount", "max_amount_by_rail",
-        "max_amount_per_hour", "warn_new_merchants", "deny_new_merchants", "agents",
-        "merchants", "targets", "providers", "gateway_tokens", "reservation_ttl_seconds",
-        "x402_resources", "content_guard", "frozen_agents", "frozen_budgets",
-        "block_on_anomaly", "block_on_anomaly_lookback_hours",
+        "max_amount_per_hour", "max_request_bytes", "warn_new_merchants",
+        "deny_new_merchants", "agents", "merchants", "targets", "providers",
+        "gateway_tokens", "reservation_ttl_seconds", "x402_resources",
+        "content_guard", "frozen_agents", "frozen_budgets", "block_on_anomaly",
+        "block_on_anomaly_lookback_hours",
     }
     content_guard_keys = {"max_bytes", "deny_patterns", "deny_secrets"}
     agent_keys = {"budgets", "rails", "max_amount", "budgets_caps", "merchants"}
@@ -318,10 +319,19 @@ def validate_policy(policy: dict) -> list[str]:
 
     if "budgets" in policy and not isinstance(policy["budgets"], dict):
         errors.append("budgets must be an object")
-    if "reservation_ttl_seconds" in policy and int(policy["reservation_ttl_seconds"]) <= 0:
-        errors.append("reservation_ttl_seconds must be positive")
-    if "block_on_anomaly_lookback_hours" in policy and float(policy["block_on_anomaly_lookback_hours"]) <= 0:
-        errors.append("block_on_anomaly_lookback_hours must be positive")
+    for key in ("reservation_ttl_seconds", "max_request_bytes"):
+        if key in policy:
+            try:
+                if int(policy[key]) <= 0:
+                    errors.append(f"{key} must be positive")
+            except (TypeError, ValueError):
+                errors.append(f"{key} must be an integer")
+    if "block_on_anomaly_lookback_hours" in policy:
+        try:
+            if float(policy["block_on_anomaly_lookback_hours"]) <= 0:
+                errors.append("block_on_anomaly_lookback_hours must be positive")
+        except (TypeError, ValueError):
+            errors.append("block_on_anomaly_lookback_hours must be a number")
 
     guard = policy.get("content_guard")
     if guard is not None:

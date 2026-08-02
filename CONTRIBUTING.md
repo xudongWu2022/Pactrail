@@ -19,6 +19,7 @@ Thanks for helping build agent-spend-collector.
 python3 -m unittest discover -s tests        # tests
 python3 -m compileall spend_collector tests  # compile
 python3 -m spend_collector demo              # product self-check
+python3 -m spend_collector run-scenarios     # payment/gateway incident records
 ```
 
 CI runs the same across Python 3.10–3.12.
@@ -36,6 +37,8 @@ CI runs the same across Python 3.10–3.12.
 - Keep the diff focused — one concern per PR.
 - Add or update a test for any behavior change (`tests/test_collector.py`).
 - Update `README.md` / `docs/OPERATIONS.md` when you change the interface.
+- Add a `scenarios/*.json` record when a payment, retry, reservation, or policy
+  invariant is introduced or fixed. Keep it deterministic and free of secrets.
 - No secrets in code, fixtures, or policy files — use `*_env` references.
 
 By contributing you agree your work is licensed under the repository's MIT license.

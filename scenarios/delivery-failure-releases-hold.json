@@ -1,0 +1,15 @@
+{
+  "id": "delivery-failure-releases-hold",
+  "description": "An upstream timeout is an incident: the gateway hold must be released and the fault retained in the report.",
+  "policy": {"rails": ["api_x402"], "budgets": {"research": 10.0}, "max_amount": 5.0},
+  "steps": [
+    {"action": "guard", "request_id": "pay-003", "request": {"agent": "research-bot", "rail": "api_x402", "amount": 2.5, "budget": "research", "provider": "x402", "service": "/search"}, "expect": {"decision": "allow", "reservation_status": "active"}},
+    {"action": "fault", "request_id": "pay-003", "kind": "upstream_timeout", "release_reservation": true}
+  ],
+  "expect": {
+    "ledger": {"event_count": 0, "total": 0.0},
+    "gateway": {"allow_count": 1, "deny_count": 0, "decision_count": 1, "reservations": {"released": {"count": 1, "amount": 2.5}}},
+    "faults": [{"request_id": "pay-003", "kind": "upstream_timeout"}],
+    "requests": {"pay-003": {"decision": "allow", "reservation_status": "released"}}
+  }
+}

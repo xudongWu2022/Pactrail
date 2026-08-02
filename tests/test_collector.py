@@ -201,11 +201,13 @@ class CollectorTest(unittest.TestCase):
 
     def test_cli_demo_writes_artifacts_to_out_dir(self) -> None:
         with tempfile.TemporaryDirectory() as out_dir:
+            db_path = Path(out_dir) / "demo.db"
             with contextlib.redirect_stdout(io.StringIO()):
-                main(["demo", "--out-dir", out_dir])
+                main(["demo", "--db", str(db_path), "--out-dir", out_dir])
             self.assertTrue((Path(out_dir) / "report.html").exists())
             self.assertTrue((Path(out_dir) / "alerts.json").exists())
             self.assertTrue((Path(out_dir) / "run-summary.json").exists())
+            self.assertTrue(db_path.exists())
 
     def test_cli_report_requires_existing_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -898,6 +900,9 @@ class CollectorTest(unittest.TestCase):
             self.assertIn("api.openai.com", audit["outbound_hosts"])
             self.assertNotIn("sk-secret", json.dumps(audit))
             self.assertIn("prompts", audit["will_not_store"])
+            self.assertEqual(validate_policy({"gateway_tokens": ["t"], "max_request_bytes": 1024}), [])
+            self.assertTrue(validate_policy({"gateway_tokens": ["t"], "max_request_bytes": 0}))
+            self.assertTrue(validate_policy({"gateway_tokens": ["t"], "max_request_bytes": "huge"}))
 
     def test_gateway_requires_token_for_forwarding_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -930,6 +935,71 @@ class CollectorTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as err:
                 urllib.request.urlopen(req, timeout=2)
             self.assertEqual(err.exception.code, 401)
+
+    def test_gateway_rejects_oversized_body_before_forwarding(self) -> None:
+        calls = []
+
+        class Provider(BaseHTTPRequestHandler):
+            def do_POST(self):
+                calls.append(self.path)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                return
+
+        provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        provider_thread.start()
+        self.addCleanup(lambda: (provider.shutdown(), provider_thread.join(1), provider.server_close()))
+
+        old_key = os.environ.get("FAKE_OPENAI_KEY")
+        os.environ["FAKE_OPENAI_KEY"] = "sk-provider-secret"
+        if old_key is None:
+            self.addCleanup(lambda: os.environ.pop("FAKE_OPENAI_KEY", None))
+        else:
+            self.addCleanup(lambda: os.environ.__setitem__("FAKE_OPENAI_KEY", old_key))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "spend.db"
+            policy_path = Path(tmp) / "policy.json"
+            with open(policy_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "gateway_tokens": ["agent-token"],
+                    "max_request_bytes": 32,
+                    "providers": {
+                        "openai": {
+                            "base_url": f"http://127.0.0.1:{provider.server_port}",
+                            "api_key_env": "FAKE_OPENAI_KEY",
+                            "amount": 0.1,
+                        },
+                    },
+                }, f)
+
+            gateway_server = make_gateway_server(str(db_path), str(policy_path), port=0)
+            gateway_port = gateway_server.server_port
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            self.addCleanup(lambda: (gateway_server.shutdown(), gateway_thread.join(1), gateway_server.server_close()))
+            self.wait_for_http(f"http://127.0.0.1:{gateway_port}/health")
+
+            body = json.dumps({"model": "gpt-test", "input": "x" * 80}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{gateway_port}/openai/v1/chat/completions",
+                data=body,
+                headers={
+                    "content-type": "application/json",
+                    "authorization": "Bearer agent-token",
+                    "x-agent-id": "research-bot",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(req, timeout=2)
+            self.assertEqual(err.exception.code, 413)
+            payload = json.loads(err.exception.read())
+            self.assertEqual(payload["error"], "payload_too_large")
+            self.assertEqual(calls, [])
 
     def test_gateway_audits_and_reserves_then_releases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

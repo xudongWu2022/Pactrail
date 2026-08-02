@@ -25,10 +25,32 @@ python3 -m spend_collector demo
 
 Then open `report.html`.
 
+For a browser-based, auto-refreshing demo, run:
+
+```bash
+python3 -m spend_collector demo-live --policy gateway.example.json
+```
+
+Then open `http://127.0.0.1:8787/dashboard?token=dev-gateway-token`. It serves the
+fixture-backed SQLite ledger with simulated cross-rail spend, budget burn, and
+security signals; no provider credentials are needed.
+
 The demo path is:
 
 ```text
 fixtures -> one SQLite ledger -> anomaly detectors -> report.html
+```
+
+```mermaid
+flowchart LR
+  A[Agent SDK or wallet] -->|LLM, x402, USDC, cloud, Stripe| B[Collector adapters]
+  A -->|pre-spend request| C[Gateway policy]
+  C -->|allow / reserve| D[Provider or paid API]
+  C -->|deny / audit| E[Gateway decisions]
+  B --> F[(SQLite spend ledger)]
+  D --> F
+  E --> F
+  F --> G[Detectors and live dashboard]
 ```
 
 Expected outputs:
@@ -254,7 +276,11 @@ curl -X POST http://127.0.0.1:8787/forward \
   -d '{"agent":"research-bot","target":"scraper-demo","body":{"query":"pricing data"}}'
 ```
 
-The gateway checks the same policy first. If denied, it does not call the upstream URL. If allowed, it forwards the body and records the estimated spend.
+The gateway checks the target's policy first. If allowed, it forwards the request
+body to the configured URL. If denied, it does not call the target and returns a
+JSON decision such as `{"decision":"deny","allowed":false,"reasons":[...]}`.
+It never returns prompts, rewrites prompts, or injects model instructions.
+`max_request_bytes` caps request bodies before they are read into memory.
 
 Example 3: put an OpenAI-compatible provider behind the gateway.
 
@@ -280,6 +306,28 @@ headers = {"X-Agent-ID": "research-bot", "X-Budget-ID": "team-research"}
 
 The real provider key stays on the gateway. The agent only gets the gateway token.
 
+### Copy-Paste Integrations
+
+The [`examples/`](examples) directory contains zero-dependency clients that use the
+same gateway token and agent/budget headers:
+
+```bash
+# Terminal 1: provider keys stay here, not in the client process.
+export SPEND_GATEWAY_TOKEN=dev-gateway-token
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 -m spend_collector gateway --policy gateway.example.json --db spend.db
+
+# Terminal 2: choose the client your agent already speaks.
+python3 examples/openai_gateway.py
+python3 examples/anthropic_gateway.py
+python3 examples/x402_probe.py
+```
+
+`x402_probe.py` safely performs the initial 402 negotiation and prints the public
+payment requirements. An x402-capable wallet/SDK then signs that exact requirement
+and retries; the gateway validates the payment binding before forwarding.
+
 For x402 seller-side middleware, freeze/unfreeze, content guards, anomaly-based blocking, and production safety notes, see [`docs/OPERATIONS.md`](docs/OPERATIONS.md) and [`SECURITY.md`](SECURITY.md).
 
 ### Dashboard
@@ -290,7 +338,32 @@ Every ingest command writes a local static dashboard:
 python3 -m spend_collector report --db spend.db --out-dir artifacts
 ```
 
-The dashboard shows total spend, rail mix, alert counts, budget burn, agent-by-rail totals, recent ledger events, and short evidence hashes. It uses no server and no external assets.
+The dashboard shows total spend, rail mix, alert counts, budget burn, agent-by-rail totals, recent ledger events, and short evidence hashes. It uses no server and no external assets. The gateway's `/dashboard` endpoint is the live, auto-refreshing variant.
+
+### Demo Evidence
+
+The fixture demo exercises 17 idempotent ledger events across four observed rails
+(LLM token, x402, USDC, and Stripe) and deliberately triggers six detector classes:
+spend spike, budget burn, burn rate, spend per task, new key spike, and new
+merchant/provider. The gateway adds three request paths to the live product surface:
+OpenAI/Anthropic-compatible provider proxying, allowlisted paid API forwarding, and
+x402 seller middleware. The full test suite verifies the demo and these boundaries.
+
+For a three-minute walkthrough recording script, see [`docs/DEMO.md`](docs/DEMO.md).
+
+### Incident Scenarios
+
+The committed [`scenarios/`](scenarios) library turns expensive-looking failures
+into repeatable tests: duplicate retries, budget denial before payment, successful
+settlement release, and upstream delivery failure. Run it locally or in CI:
+
+```bash
+python3 -m spend_collector run-scenarios --path scenarios --out-dir artifacts
+```
+
+It writes a stable ledger/gateway snapshot to `artifacts/scenario-report.json`.
+See [`docs/SCENARIOS.md`](docs/SCENARIOS.md) for the JSON format and rules for
+adding a new incident record.
 
 ### Project Map
 

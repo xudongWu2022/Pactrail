@@ -6,6 +6,7 @@
     "default": 100.0
   },
   "max_amount": 5.0,
+  "max_request_bytes": 10485760,
   "max_amount_by_rail": {
     "api_x402": 3.0,
     "stablecoin": 25.0,
@@ -26,6 +27,18 @@
     }
   },
   "providers": {
+    "anthropic": {
+      "base_url": "https://api.anthropic.com",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "auth_header": "x-api-key",
+      "auth_prefix": "",
+      "rail": "llm_token",
+      "provider": "anthropic",
+      "merchant": "anthropic",
+      "service_from_body": "model",
+      "amount": 0.25,
+      "budget": "team-research"
+    },
     "openai": {
       "base_url": "https://api.openai.com",
       "api_key_env": "OPENAI_API_KEY",
