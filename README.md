@@ -25,8 +25,7 @@ python3 -m spend_collector run-scenarios --path scenarios --out-dir artifacts
 
 The first command produces a cross-rail dashboard and alert report; the second
 executes the payment/gateway incident library and writes a deterministic ledger
-snapshot. For a five-minute technical walkthrough, see
-[`docs/INTERVIEW.md`](docs/INTERVIEW.md).
+snapshot.
 
 [![English](https://img.shields.io/badge/README-English-blue)](#english)
 [![中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-red)](#中文)
