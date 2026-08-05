@@ -4,6 +4,30 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 
+> **One ledger and one policy boundary for every way an AI agent can spend.**
+
+## What To Evaluate First
+
+| Engineering signal | Evidence in this repository |
+|---|---|
+| Cross-system data design | 5 normalized FOCUS-shaped rails: LLM, paid API/x402, stablecoin, cloud, and card; 9 named ingestion paths across OpenAI/Anthropic/OpenRouter, Base USDC/x402, AWS/GCP/Azure, and Stripe. |
+| Inline financial controls | A self-hosted gateway performs pre-spend policy decisions, budget reservations, hourly velocity caps, content checks, freeze switches, and metadata-only audit logging. |
+| Payment protocol correctness | x402 seller middleware binds payment data to the configured resource, amount, recipient, network, and asset; duplicate request IDs cannot create a second hold. |
+| Failure-oriented engineering | Committed JSON incident scenarios replay successful settlement, duplicate retries, budget denial before payment, and delivery failure with hold release. |
+| Verifiable delivery | `76` automated tests, zero required runtime dependencies, fixture demo, policy validation, and a token-gated live dashboard. |
+
+### Verify It In 60 Seconds
+
+```bash
+python3 -m spend_collector demo --out-dir artifacts
+python3 -m spend_collector run-scenarios --path scenarios --out-dir artifacts
+```
+
+The first command produces a cross-rail dashboard and alert report; the second
+executes the payment/gateway incident library and writes a deterministic ledger
+snapshot. For a five-minute technical walkthrough, see
+[`docs/INTERVIEW.md`](docs/INTERVIEW.md).
+
 [![English](https://img.shields.io/badge/README-English-blue)](#english)
 [![中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-red)](#中文)
 
