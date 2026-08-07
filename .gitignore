@@ -8,3 +8,4 @@ artifacts/
 artifacts-*/
 dist/
 *.egg-info/
+PROJECT_MEMORY.md

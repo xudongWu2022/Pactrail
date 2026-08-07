@@ -29,6 +29,7 @@ class SpendStore:
         self.db.execute(_DDL)
         self.db.execute(_GATEWAY_DECISIONS_DDL)
         self.db.execute(_SPEND_RESERVATIONS_DDL)
+        self.db.execute(_X402_PAYMENTS_DDL)
         self._migrate_columns()
 
     def _migrate_columns(self) -> None:
@@ -158,6 +159,46 @@ class SpendStore:
         )
         self.db.commit()
 
+    def claim_x402_payment(self, request_id: str, resource_id: str, payment_fingerprint: str) -> str | None:
+        """Claim a signed x402 payload before verification/settlement.
+
+        Returns the earlier request id when this exact signed payload was already
+        claimed. The unique fingerprint makes the replay check safe across
+        concurrent gateway workers without storing the payment payload itself.
+        """
+        now = _now()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute(
+                "SELECT request_id FROM x402_payments WHERE payment_fingerprint = ?",
+                (payment_fingerprint,),
+            ).fetchone()
+            if row:
+                self.db.commit()
+                return str(row["request_id"])
+            self.db.execute(
+                "INSERT INTO x402_payments (request_id, resource_id, payment_fingerprint, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'approved', ?, ?)",
+                (request_id, resource_id, payment_fingerprint, now, now),
+            )
+            self.db.commit()
+            return None
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def update_x402_payment(self, request_id: str, status: str, *, transaction_ref: str = "",
+                            detail: str = "") -> None:
+        self.db.execute(
+            "UPDATE x402_payments SET status = ?, transaction_ref = CASE WHEN ? = '' THEN transaction_ref ELSE ? END, "
+            "detail = ?, updated_at = ? WHERE request_id = ?",
+            (status, transaction_ref, transaction_ref, detail, _now(), request_id),
+        )
+        self.db.commit()
+
+    def x402_payment(self, request_id: str):
+        return self.db.execute("SELECT * FROM x402_payments WHERE request_id = ?", (request_id,)).fetchone()
+
     def reserve_and_record_gateway_decision(self, *, request_id: str, req, decision: str,
                                             reasons: list[str], route_type: str = "guard",
                                             route_id: str = "", ttl_seconds: int = 900,
@@ -279,4 +320,10 @@ _SPEND_RESERVATIONS_DDL = (
     "CREATE TABLE IF NOT EXISTS spend_reservations ("
     "reservation_id TEXT PRIMARY KEY, request_id TEXT UNIQUE, created_at TEXT, "
     "expires_at TEXT, x_agent_id TEXT, x_budget_id TEXT, amount REAL, status TEXT)"
+)
+
+_X402_PAYMENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS x402_payments ("
+    "request_id TEXT PRIMARY KEY, resource_id TEXT, payment_fingerprint TEXT UNIQUE, "
+    "status TEXT, transaction_ref TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TEXT, updated_at TEXT)"
 )

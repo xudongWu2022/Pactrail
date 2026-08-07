@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -35,6 +36,9 @@ from .providers import llm_provider
 from .report import render
 from .scenarios import ScenarioError, render_report, run_scenarios
 from .store import SpendStore
+from .facilitator import FacilitatorError, require_supported
+from .bazaar import approved_gateway_resources, fetch_resources, filter_resources
+from .x402_sandbox import x402_sandbox
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURES = _ROOT / "fixtures"
@@ -304,6 +308,50 @@ def _facilitator_request_json(url: str, payload: dict, resource: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("facilitator response must be a JSON object")
     return data
+
+
+def check_facilitator(args) -> dict:
+    """Fail closed when a facilitator does not advertise a resource's payment kind."""
+    try:
+        capabilities = require_supported(
+            args.url, version=args.version, scheme=args.scheme, network=args.network,
+            auth_env=args.auth_env, timeout=args.timeout,
+        )
+    except (FacilitatorError, OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        raise SystemExit(1)
+    result = {"ok": True, "url": args.url, "version": args.version,
+              "scheme": args.scheme, "network": args.network,
+              "extensions": capabilities.get("extensions", [])}
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return result
+
+
+def filter_bazaar_cmd(args) -> list[dict]:
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    policy = _load_policy(args.policy)
+    results = filter_resources(payload, policy)
+    output = {"allowed": sum(r["allowed"] for r in results), "denied": sum(not r["allowed"] for r in results),
+              "resources": results}
+    if args.out:
+        _write_json_artifact(args.out, output)
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return results
+
+
+def fetch_bazaar_cmd(args) -> dict:
+    payload = fetch_resources(args.url, limit=args.limit, offset=args.offset, timeout=args.timeout)
+    _write_json_artifact(args.out, payload)
+    print(f"Wrote {args.out}")
+    return payload
+
+
+def adopt_bazaar_cmd(args) -> dict:
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    resources = approved_gateway_resources(payload, _load_policy(args.policy))
+    _write_json_artifact(args.out, {"x402_resources": resources})
+    print(f"Wrote {len(resources)} approved x402 resource(s) to {args.out}")
+    return resources
 
 
 def _alert_payload(alerts: list, summary: dict) -> dict | None:
@@ -957,6 +1005,61 @@ def guard(args) -> dict:
     return decision
 
 
+def simulate_spend(args) -> dict:
+    """Run synthetic agent purchases through the local policy and ledger only.
+
+    This command never contacts a provider, wallet, card network, or x402
+    facilitator.  It is useful for exercising budgets and anomaly detection with
+    the exact allow -> record-spend lifecycle used by the gateway.
+    """
+    if args.amount <= 0:
+        raise ValueError("--amount must be greater than zero")
+    if args.count < 1:
+        raise ValueError("--count must be at least one")
+
+    policy = _load_policy(args.policy)
+    require_valid_policy(policy, env_token=os.environ.get("SPEND_GATEWAY_TOKEN"))
+    provider = args.provider or {"llm_token": "openai", "api_x402": "x402",
+                                 "stablecoin": "usdc", "card": "stripe"}.get(args.rail, "simulator")
+    merchant = args.merchant or provider
+    service = args.service or "simulated-purchase"
+    decisions: list[dict] = []
+
+    with SpendStore(args.db) as store:
+        for index in range(args.count):
+            req = GuardRequest(
+                x_agent_id=args.agent,
+                rail=args.rail,
+                amount=args.amount,
+                x_budget_id=args.budget,
+                provider_name=provider,
+                service_name=service,
+                x_merchant_id=merchant,
+                x_session_id=args.session or f"simulation-{uuid.uuid4().hex[:8]}",
+            )
+            request_id = f"sim:{uuid.uuid4().hex}"
+            decision = _decide_and_record(store, policy, req, request_id=request_id,
+                                          route_type="simulation", route_id="simulate-spend")
+            decisions.append(decision)
+            if decision["allowed"]:
+                record_target_spend(store, {
+                    "agent": args.agent, "rail": args.rail, "amount": args.amount,
+                    "budget": args.budget, "provider": provider, "service": service,
+                    "merchant": merchant, "session": req.x_session_id,
+                }, request_id)
+
+        _finish_run(store, {str(k): float(v) for k, v in (policy.get("budgets") or {}).items()}, args.out_dir)
+        result = {
+            "simulated": args.count,
+            "recorded": sum(1 for decision in decisions if decision["allowed"]),
+            "denied": sum(1 for decision in decisions if not decision["allowed"]),
+            "total_spend": store.total(),
+            "decisions": decisions,
+        }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return result
+
+
 def _edit_frozen(policy_path: str, agents: list[str], budgets: list[str], *, remove: bool) -> dict:
     path = Path(policy_path)
     policy = _load_json_file(policy_path)
@@ -1005,11 +1108,30 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
     require_valid_policy(startup_policy, env_token=os.environ.get("SPEND_GATEWAY_TOKEN"))
 
     class Handler(BaseHTTPRequestHandler):
+        def _cors_headers(self) -> dict[str, str]:
+            """Allow the local Pactrail wallet demo to call its loopback gateway.
+
+            This is deliberately restricted to localhost development origins. A
+            deployed gateway should put its own authenticated UI behind the same
+            origin or configure an explicit production allowlist.
+            """
+            origin = self.headers.get("origin", "")
+            allowed = {"http://localhost:3000", "http://127.0.0.1:3000"}
+            if origin in allowed:
+                return {
+                    "access-control-allow-origin": origin,
+                    "vary": "Origin",
+                    "access-control-allow-headers": "authorization, content-type, x-request-id",
+                    "access-control-allow-methods": "GET, POST, OPTIONS",
+                }
+            return {}
+
         def _send(self, code: int, payload: dict, headers: dict | None = None) -> None:
             body = json.dumps(payload, indent=2, sort_keys=True).encode()
             self.send_response(code)
             sent_content_type = False
-            for key, value in (headers or {}).items():
+            response_headers = {**self._cors_headers(), **(headers or {})}
+            for key, value in response_headers.items():
                 if key.lower() == "content-type":
                     sent_content_type = True
                 self.send_header(str(key), str(value))
@@ -1021,7 +1143,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
 
         def _send_bytes(self, code: int, body: bytes, headers: dict[str, str]) -> None:
             self.send_response(code)
-            for key, value in headers.items():
+            for key, value in {**self._cors_headers(), **headers}.items():
                 if key.lower() in {"connection", "content-length", "transfer-encoding"}:
                     continue
                 self.send_header(key, value)
@@ -1039,6 +1161,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     continue
                 self.send_header(key, value)
             for key, value in (extra_headers or {}).items():
+                self.send_header(str(key), str(value))
+            for key, value in self._cors_headers().items():
                 self.send_header(str(key), str(value))
             if not is_stream:
                 body = resp.read()
@@ -1252,6 +1376,18 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 self._send(403, decision)
                 return True
             requirements = _x402_payment_requirements(resource)
+            if resource.get("preflight_supported"):
+                try:
+                    require_supported(
+                        str(resource.get("facilitator_url", "")),
+                        version=int(resource.get("x402_version", 2)),
+                        scheme=str(requirements["scheme"]), network=str(requirements["network"]),
+                        auth_env=resource.get("facilitator_auth_env"),
+                        timeout=float(resource.get("timeout", 30)),
+                    )
+                except (FacilitatorError, OSError, ValueError) as exc:
+                    self._send(503, {"error": "facilitator_unsupported", "detail": str(exc)})
+                    return True
             payment_header = self.headers.get("payment-signature") or self.headers.get("x-payment")
             if not payment_header:
                 with SpendStore(str(db_path)) as store:
@@ -1294,6 +1430,22 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     "message": "; ".join(binding_errors),
                 })
                 return True
+            # A signature is single-use: retain only its digest, never the signed
+            # payload, so it cannot be replayed under a fresh request id.
+            payment_fingerprint = hashlib.sha256(
+                json.dumps(payment_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            with SpendStore(str(db_path)) as store:
+                previous_request = store.claim_x402_payment(request_id, resource_id, payment_fingerprint)
+                if previous_request:
+                    store.release_reservation(request_id)
+                    self._send(409, {
+                        "error": "replayed_x402_payment",
+                        "request_id": request_id,
+                        "previous_request_id": previous_request,
+                        "detail": "This payment signature was already submitted; sign a fresh payment.",
+                    })
+                    return True
             facilitator = str(resource.get("facilitator_url", ""))
             if not facilitator:
                 raise ValueError("x402 resource missing facilitator_url")
@@ -1311,11 +1463,16 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if not verify_result.get("isValid"):
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
+                    store.update_x402_payment(request_id, "verification_failed",
+                                              detail=str(verify_result.get("invalidReason", "invalid_payment")))
                 self._send_x402_required(resource_id, resource, requirements, error={
                     "reason": verify_result.get("invalidReason", "invalid_payment"),
                     "message": verify_result.get("invalidMessage", "payment verification failed"),
                 })
                 return True
+
+            with SpendStore(str(db_path)) as store:
+                store.update_x402_payment(request_id, "verified")
 
             settle_result = _facilitator_request_json(
                 facilitator.rstrip("/") + "/settle",
@@ -1325,6 +1482,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if settle_result.get("success") is False:
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
+                    store.update_x402_payment(request_id, "settlement_failed",
+                                              detail=str(settle_result.get("errorReason", "settlement_failed")))
                 self._send_x402_required(resource_id, resource, requirements, error={
                     "reason": settle_result.get("errorReason", "settlement_failed"),
                     "message": settle_result.get("errorMessage", "payment settlement failed"),
@@ -1340,8 +1499,19 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     verify_result,
                     settle_result,
                 )
+                store.update_x402_payment(
+                    request_id, "settled",
+                    transaction_ref=str(settle_result.get("transaction") or settle_result.get("txHash") or ""),
+                )
             self._raw_body = body
-            self._forward_x402_resource(resource, settle_result)
+            try:
+                self._forward_x402_resource(resource, settle_result)
+            except (urllib.error.URLError, OSError) as exc:
+                with SpendStore(str(db_path)) as store:
+                    store.update_x402_payment(request_id, "delivery_failed", detail=str(exc))
+                raise
+            with SpendStore(str(db_path)) as store:
+                store.update_x402_payment(request_id, "delivered")
             return True
 
         def _forward(self, target: dict, payload: dict,
@@ -1461,6 +1631,13 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         store.release_reservation(request_id)
                 self._send_bytes(exc.code, exc.read(), dict(exc.headers.items()))
 
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            for key, value in self._cors_headers().items():
+                self.send_header(str(key), str(value))
+            self.send_header("content-length", "0")
+            self.end_headers()
+
         def do_GET(self) -> None:
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/health":
@@ -1476,6 +1653,19 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 with SpendStore(str(db_path)) as store:
                     html = render(store, budgets, run_all(store, budgets), refresh_seconds=30)
                 self._send_bytes(200, html.encode("utf-8"), {"content-type": "text/html; charset=utf-8"})
+                return
+            if parsed.path.startswith("/x402/payments/"):
+                policy = _load_policy(policy_path)
+                if not self._authorized(policy):
+                    self._send(401, {"error": "unauthorized"})
+                    return
+                request_id = parsed.path.rsplit("/", 1)[-1]
+                with SpendStore(str(db_path)) as store:
+                    payment = store.x402_payment(request_id)
+                if payment is None:
+                    self._send(404, {"error": "x402_payment_not_found", "request_id": request_id})
+                else:
+                    self._send(200, {key: payment[key] for key in payment.keys() if key != "payment_fingerprint"})
                 return
             policy = _load_policy(policy_path)
             if self._handle_x402(policy):
@@ -1725,11 +1915,54 @@ def _parser() -> argparse.ArgumentParser:
     guard_p.add_argument("--enforce-exit-code", action="store_true",
                          help="exit 2 on deny so callers can block the spend")
 
+    simulate_p = sub.add_parser("simulate-spend", parents=[common],
+                                help="simulate agent purchases locally through policy and ledger")
+    simulate_p.add_argument("--db", default="spend-sim.db", help="SQLite ledger path")
+    simulate_p.add_argument("--policy", help="optional gateway policy JSON to enforce")
+    simulate_p.add_argument("--agent", required=True, help="simulated agent id")
+    simulate_p.add_argument("--budget", required=True, help="budget id charged by each purchase")
+    simulate_p.add_argument("--amount", type=float, required=True, help="amount of each simulated purchase")
+    simulate_p.add_argument("--count", type=int, default=1, help="number of purchase attempts")
+    simulate_p.add_argument("--rail", default="api_x402", help="rail, e.g. llm_token, api_x402, stablecoin, card")
+    simulate_p.add_argument("--provider", help="simulated provider name")
+    simulate_p.add_argument("--merchant", help="simulated merchant id")
+    simulate_p.add_argument("--service", help="simulated model, endpoint, or product")
+    simulate_p.add_argument("--session", help="session id; a random one is used when omitted")
+
     gateway_p = sub.add_parser("gateway", help="run local HTTP pre-spend gateway")
     gateway_p.add_argument("--db", default="spend.db", help="SQLite ledger path")
     gateway_p.add_argument("--policy", help="gateway policy JSON; defaults to SPEND_POLICY_FILE")
     gateway_p.add_argument("--host", default="127.0.0.1", help="bind host")
     gateway_p.add_argument("--port", type=int, default=8787, help="bind port")
+
+    sandbox_p = sub.add_parser("x402-sandbox", help="run a local x402 facilitator and paid-resource simulator")
+    sandbox_p.add_argument("--host", default="127.0.0.1", help="bind host (keep loopback for local-only use)")
+    sandbox_p.add_argument("--port", type=int, default=8788, help="bind port")
+
+    facilitator_p = sub.add_parser("check-facilitator", help="verify a facilitator supports an x402 payment kind")
+    facilitator_p.add_argument("--url", required=True, help="facilitator base URL")
+    facilitator_p.add_argument("--network", required=True, help="CAIP-2 network id")
+    facilitator_p.add_argument("--scheme", default="exact", help="x402 scheme")
+    facilitator_p.add_argument("--version", type=int, default=2, help="x402 protocol version")
+    facilitator_p.add_argument("--auth-env", help="environment variable holding a pre-minted Bearer JWT")
+    facilitator_p.add_argument("--timeout", type=float, default=10, help="request timeout seconds")
+
+    bazaar_p = sub.add_parser("filter-bazaar", help="locally filter x402 Bazaar discovery results with policy")
+    bazaar_p.add_argument("--input", required=True, help="Bazaar discovery JSON (items/resources array)")
+    bazaar_p.add_argument("--policy", required=True, help="policy JSON containing bazaar_policy")
+    bazaar_p.add_argument("--out", help="optional JSON result path")
+
+    fetch_bazaar_p = sub.add_parser("fetch-bazaar", help="download public x402 Bazaar HTTP resources")
+    fetch_bazaar_p.add_argument("--out", default="bazaar-results.json", help="output JSON path")
+    fetch_bazaar_p.add_argument("--url", default="https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources", help="Bazaar list endpoint")
+    fetch_bazaar_p.add_argument("--limit", type=int, default=100, help="page size")
+    fetch_bazaar_p.add_argument("--offset", type=int, default=0, help="page offset")
+    fetch_bazaar_p.add_argument("--timeout", type=float, default=15, help="request timeout seconds")
+
+    adopt_bazaar_p = sub.add_parser("adopt-bazaar", help="generate reviewable Gateway x402 resource config from approved Bazaar results")
+    adopt_bazaar_p.add_argument("--input", required=True, help="Bazaar discovery JSON")
+    adopt_bazaar_p.add_argument("--policy", required=True, help="policy JSON containing bazaar_policy")
+    adopt_bazaar_p.add_argument("--out", default="bazaar-approved-resources.json", help="generated x402_resources JSON")
 
     validate_p = sub.add_parser("validate-policy", help="strictly validate gateway policy JSON")
     validate_p.add_argument("--policy", required=True, help="gateway policy JSON")
@@ -1788,8 +2021,20 @@ def main(argv: list[str] | None = None) -> None:
         report(args.db, args.out_dir)
     elif cmd == "guard":
         guard(args)
+    elif cmd == "simulate-spend":
+        simulate_spend(args)
     elif cmd == "gateway":
         gateway(args.db, args.policy, args.host, args.port)
+    elif cmd == "x402-sandbox":
+        x402_sandbox(args.host, args.port)
+    elif cmd == "check-facilitator":
+        check_facilitator(args)
+    elif cmd == "filter-bazaar":
+        filter_bazaar_cmd(args)
+    elif cmd == "fetch-bazaar":
+        fetch_bazaar_cmd(args)
+    elif cmd == "adopt-bazaar":
+        adopt_bazaar_cmd(args)
     elif cmd == "validate-policy":
         validate_policy_cmd(args.policy)
     elif cmd == "audit-config":

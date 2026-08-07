@@ -39,6 +39,9 @@ from spend_collector.sources import (
     from_openrouter_generation_rows, load_gcp_billing_export,
 )
 from spend_collector.store import SpendStore
+from spend_collector.x402_sandbox import make_x402_sandbox
+from spend_collector.facilitator import require_supported
+from spend_collector.bazaar import approved_gateway_resources, filter_resources
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures"
@@ -89,6 +92,49 @@ class CollectorTest(unittest.TestCase):
         } <= kinds)
         self.assertTrue(any(a.kind == "new_key_spike" and a.subject == "new-key-bot" for a in alerts))
 
+    def test_x402_sandbox_is_local_and_settlement_is_idempotent(self) -> None:
+        server = make_x402_sandbox(port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(1), server.server_close()))
+        base = f"http://127.0.0.1:{server.server_port}"
+        payment = {"paymentPayload": {"payload": {"authorization": "sandbox"}},
+                   "paymentRequirements": {"amount": "2500000"}}
+        results = []
+        for _ in range(2):
+            req = urllib.request.Request(base + "/settle", data=json.dumps(payment).encode(),
+                                         headers={"content-type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                results.append(json.load(resp))
+        self.assertTrue(results[0]["success"])
+        self.assertEqual(results[0]["transaction"], results[1]["transaction"])
+        capabilities = require_supported(base, version=2, scheme="exact", network="eip155:84532")
+        self.assertEqual(capabilities["kinds"][0]["scheme"], "exact")
+
+    def test_bazaar_filter_requires_all_configured_payment_dimensions(self) -> None:
+        results = filter_resources({"items": [
+            {"resource": "https://good.example/search", "merchant": "good-data", "price": "$0.02",
+             "paymentRequirements": {"scheme": "exact", "network": "eip155:8453", "asset": "0xusdc", "payTo": "0xgood"}},
+            {"resource": "https://bad.example/search", "merchant": "unknown", "price": "$0.20",
+             "paymentRequirements": {"scheme": "upto", "network": "eip155:1", "asset": "0xbad", "payTo": "0xbad"}},
+        ]}, {"bazaar_policy": {
+            "max_usd_price": 0.05, "allowed_networks": ["eip155:8453"], "allowed_schemes": ["exact"],
+            "allowed_assets": ["0xusdc"], "allowed_pay_to": ["0xgood"], "approved_merchants": ["good-data"],
+        }})
+        self.assertEqual([row["allowed"] for row in results], [True, False])
+        self.assertGreaterEqual(len(results[1]["reasons"]), 6)
+
+    def test_bazaar_adoption_emits_only_approved_gateway_resources(self) -> None:
+        payload = [{"resource": "https://good.example/search", "merchant": "good", "price": 0.02,
+                    "paymentRequirements": {"scheme": "exact", "network": "eip155:8453", "asset": "0xusdc", "payTo": "0xgood", "amount": "20000"}}]
+        resources = approved_gateway_resources(payload, {"bazaar_policy": {
+            "allowed_networks": ["eip155:8453"], "allowed_schemes": ["exact"],
+            "allowed_assets": ["0xusdc"], "allowed_pay_to": ["0xgood"], "approved_merchants": ["good"],
+        }})
+        [resource] = resources.values()
+        self.assertEqual(resource["url"], "https://good.example/search")
+        self.assertTrue(resource["preflight_supported"])
+
     def test_demo_events_keep_source_evidence_hashes(self) -> None:
         store, _ = self.build_demo_store()
         rows = store.db.execute(
@@ -112,6 +158,24 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(store.ingest([event]), 1)
         self.assertEqual(store.ingest([event]), 0)
         self.assertEqual(store.total(), 1.23)
+
+    def test_simulate_spend_records_allowed_purchases_and_denies_over_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({
+                "rails": ["api_x402"], "budgets": {"test": 3.0}, "max_amount": 2.0,
+            }), encoding="utf-8")
+            db = root / "sim.db"
+            main([
+                "simulate-spend", "--db", str(db), "--out-dir", str(root), "--policy", str(policy),
+                "--agent", "test-agent", "--budget", "test", "--amount", "2", "--count", "2",
+            ])
+            with SpendStore(str(db)) as store:
+                self.assertAlmostEqual(store.total(), 2.0)
+                self.assertEqual(store.db.execute("SELECT COUNT(*) FROM spend_events").fetchone()[0], 1)
+                decisions = store.db.execute("SELECT decision FROM gateway_decisions ORDER BY created_at").fetchall()
+                self.assertEqual([row["decision"] for row in decisions], ["allow", "deny"])
 
     def test_stripe_adapter_maps_payment_intent_metadata(self) -> None:
         event = {
@@ -463,6 +527,42 @@ class CollectorTest(unittest.TestCase):
             self.assertIsNotNone(deny)
             self.assertIn("deny pattern", deny["reasons_json"])
 
+    def test_gateway_allows_only_local_wallet_demo_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            db_path = Path(tmp) / "spend.db"
+            policy_path.write_text(json.dumps({"gateway_tokens": ["wallet-demo-token"]}), encoding="utf-8")
+            gateway_server = make_gateway_server(str(db_path), str(policy_path), port=0)
+            gateway_port = gateway_server.server_port
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            self.addCleanup(lambda: (gateway_server.shutdown(), gateway_thread.join(1), gateway_server.server_close()))
+            self.wait_for_http(f"http://127.0.0.1:{gateway_port}/health")
+
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{gateway_port}/guard",
+                data=json.dumps({
+                    "agent": "research-bot", "budget": "default", "rail": "api_x402",
+                    "provider": "x402", "merchant": "local-x402-sandbox",
+                    "service": "/paid/research", "amount": 0.1,
+                }).encode(),
+                headers={
+                    "content-type": "application/json",
+                    "authorization": "Bearer wallet-demo-token",
+                    "origin": "http://localhost:3000",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers["access-control-allow-origin"], "http://localhost:3000")
+
+            disallowed = urllib.request.Request(f"http://127.0.0.1:{gateway_port}/health", headers={
+                "origin": "https://untrusted.example",
+            })
+            with urllib.request.urlopen(disallowed, timeout=2) as resp:
+                self.assertIsNone(resp.headers.get("access-control-allow-origin"))
+
     def test_x402_middleware_quotes_payment_requirements_before_settlement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "spend.db"
@@ -683,6 +783,28 @@ class CollectorTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as err:
                 urllib.request.urlopen(duplicate_req, timeout=2)
             self.assertEqual(err.exception.code, 409)
+
+            replay_req = urllib.request.Request(
+                f"http://127.0.0.1:{gateway_port}/x402/scrape",
+                data=json.dumps({"q": "yes"}).encode(),
+                headers={
+                    "content-type": "application/json", "payment-signature": json.dumps(payment),
+                    "x-agent-id": "research-bot", "x-budget-id": "team-research",
+                    "x-request-id": "x402-replayed-payment",
+                }, method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(replay_req, timeout=2)
+            self.assertEqual(err.exception.code, 409)
+            self.assertEqual(json.loads(err.exception.read())["error"], "replayed_x402_payment")
+
+            status_req = urllib.request.Request(
+                f"http://127.0.0.1:{gateway_port}/x402/payments/x402-req-1", method="GET",
+            )
+            with urllib.request.urlopen(status_req, timeout=2) as resp:
+                lifecycle = json.load(resp)
+            self.assertEqual(lifecycle["status"], "delivered")
+            self.assertEqual(lifecycle["transaction_ref"], "0xsettled")
 
             with SpendStore(str(db_path)) as store:
                 row = store.db.execute(

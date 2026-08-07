@@ -1,0 +1,29 @@
+{
+  "merchants": {
+    "x402api-news": {
+      "status": "candidate_requires_external_signer",
+      "provider": "x402api.app",
+      "merchant": "x402api.app",
+      "description": "Global news search for research agents",
+      "capabilities_url": "https://www.x402api.app/api/v1/capabilities",
+      "health_url": "https://www.x402api.app/api/health",
+      "resource": {
+        "url": "https://www.x402api.app/api/v1/news/search",
+        "method": "POST",
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "asset_decimals": 6,
+        "amount_units": "100000",
+        "estimated_usd_price": 0.1,
+        "pay_to": "0x45F96Bd97A1dB58Fe10642fc8c0b77556bd22d59"
+      },
+      "gateway_policy": {
+        "approved": false,
+        "max_usd_price": 0.1,
+        "requires_budget": "team-research",
+        "requires_external_signer": true
+      }
+    }
+  }
+}

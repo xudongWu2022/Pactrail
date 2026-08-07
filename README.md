@@ -1,5 +1,67 @@
 # agent-spend-collector
 
+## Simulate agent spend locally
+
+Use `simulate-spend` to exercise the gateway policy and ledger without contacting
+an LLM provider, wallet, card network, or x402 facilitator. Each allowed attempt
+is recorded as a synthetic purchase; denied attempts remain in the gateway audit.
+
+```bash
+python -m spend_collector simulate-spend --policy gateway.example.json --db spend-sim.db --out-dir artifacts-sim --agent research-bot --budget team-research --rail api_x402 --amount 2.5 --count 5 --merchant demo-tool --service /search
+```
+
+For an x402 payment that has been submitted to the gateway, query its safe
+lifecycle record (it excludes the signed payment payload):
+
+```bash
+curl http://127.0.0.1:8787/x402/payments/<request-id>
+```
+
+Run a local x402 sandbox before connecting a real facilitator or wallet:
+
+```bash
+python -m spend_collector x402-sandbox --port 8788
+```
+
+It exposes `http://127.0.0.1:8788/verify`, `/settle`, and a protected test
+resource at `/paid/search`. Point an `x402_resources` entry's `facilitator_url`
+at `http://127.0.0.1:8788` and its `url` at `http://127.0.0.1:8788/paid/search`.
+
+Preflight a facilitator before enabling it for an x402 resource:
+
+```bash
+python -m spend_collector check-facilitator --url http://127.0.0.1:8788 --network eip155:84532
+```
+
+Set `"preflight_supported": true` in an `x402_resources` entry to make the
+gateway fail closed when its facilitator does not advertise that resource's
+protocol version, scheme, and network. For CDP, set `facilitator_auth_env` to an
+environment variable containing a short-lived pre-minted CDP Bearer JWT.
+
+Filter downloaded Bazaar discovery JSON locally before adding any resource to a
+payment allowlist. Put limits under `bazaar_policy` in your policy file:
+
+```json
+{"bazaar_policy":{"max_usd_price":0.05,"allowed_networks":["eip155:8453"],"allowed_schemes":["exact"],"allowed_assets":["0xUSDC"],"allowed_pay_to":["0xMerchant"],"approved_merchants":["trusted-data"]}}
+```
+
+```bash
+python -m spend_collector filter-bazaar --input bazaar-results.json --policy policy.json --out bazaar-screened.json
+```
+
+To download one public Bazaar page and generate a reviewable `x402_resources`
+fragment containing only approved candidates:
+
+```bash
+python -m spend_collector fetch-bazaar --out bazaar-results.json
+python -m spend_collector adopt-bazaar --input bazaar-results.json --policy policy.json --out bazaar-approved-resources.json
+```
+
+`merchants.example.json` contains a verified, but disabled-by-default, merchant
+profile for x402api's paid news-search endpoint. It is a review record rather
+than a wallet integration: enable it only after approving its `payTo` address
+and connecting an external x402-compatible signer.
+
 [![CI](https://github.com/ywutian/agent-spend-collector/actions/workflows/ci.yml/badge.svg)](https://github.com/ywutian/agent-spend-collector/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
