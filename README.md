@@ -78,6 +78,63 @@ and connecting an external x402-compatible signer.
 | Failure-oriented engineering | Committed JSON incident scenarios replay successful settlement, duplicate retries, budget denial before payment, and delivery failure with hold release. |
 | Verifiable delivery | `76` automated tests, zero required runtime dependencies, fixture demo, policy validation, and a token-gated live dashboard. |
 
+## Bring Your Own Wallet Approval UI (CDP scaffold)
+
+Pactrail is the policy boundary, not a wallet custodian. The agent receives only a
+Pactrail gateway credential; it must not receive a private key, wallet session, or
+server-wallet secret. If you want a human-in-the-loop wallet UI for a local demo,
+create it in a **separate frontend repository** with Coinbase CDP's non-custodial
+wallet starter. We do not distribute that frontend source in this repository.
+
+1. In the [CDP Portal](https://portal.cdp.coinbase.com/wallets/non-custodial/clients),
+   create a non-custodial client, copy its Project ID, and add
+   `http://localhost:3000` to its allowed domains.
+2. Scaffold the UI and choose **React Single Page App** and **EVM EOA (Regular
+   Accounts)** when prompted:
+
+   ```powershell
+   npm create @coinbase/cdp-app@latest pactrail-wallet-ui
+   cd pactrail-wallet-ui
+   npm install
+   ```
+
+3. Put the CDP Project ID and local demo gateway settings in the frontend's own
+   `.env` file (never commit it):
+
+   ```text
+   VITE_CDP_PROJECT_ID=your-cdp-project-id
+   VITE_CDP_CREATE_ETHEREUM_ACCOUNT_TYPE=eoa
+   VITE_PACTRAIL_GATEWAY_URL=http://127.0.0.1:8787
+   VITE_PACTRAIL_GATEWAY_TOKEN=your-local-demo-token
+   ```
+
+4. Run Pactrail and the frontend in separate terminals:
+
+   ```powershell
+   # Terminal A: this repository
+   python -m spend_collector gateway --policy gateway.example.json --db pactrail-wallet-demo.db
+
+   # Terminal B: the separate wallet UI repository
+   npm run dev
+   ```
+
+5. Sign in to the UI by email OTP, copy its wallet address, and claim **Base
+   Sepolia ETH and USDC** from the [CDP Faucet](https://portal.cdp.coinbase.com/onchain-tools/faucet).
+   First use a self-transfer to prove wallet signing works. Then make the UI call
+   Pactrail's `POST /guard` before it asks the wallet to sign anything.
+
+The mandatory order is:
+
+```text
+Agent proposes a spend -> Pactrail policy allow -> human wallet approval/signature -> x402 facilitator -> paid service
+```
+
+For the first integration, point Pactrail at `x402-sandbox` and use Base Sepolia.
+Do not expose a production gateway token in browser JavaScript; production UIs need
+their own authenticated session and a server-side signer integration. The example
+gateway enables CORS only for `http://localhost:3000` and
+`http://127.0.0.1:3000` to support this local demo.
+
 ### Verify It In 60 Seconds
 
 ```bash
