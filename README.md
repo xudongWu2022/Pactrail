@@ -127,6 +127,7 @@ wallet starter. We do not distribute that frontend source in this repository.
    npm create @coinbase/cdp-app@latest pactrail-wallet-ui
    cd pactrail-wallet-ui
    npm install
+   npm install @x402/fetch @x402/evm
    ```
 
 3. Put the CDP Project ID and local demo gateway settings in the frontend's own
@@ -153,6 +154,12 @@ wallet starter. We do not distribute that frontend source in this repository.
    Sepolia ETH and USDC** from the [CDP Faucet](https://portal.cdp.coinbase.com/onchain-tools/faucet).
    First use a self-transfer to prove wallet signing works. Then make the UI call
    Pactrail's `POST /guard` before it asks the wallet to sign anything.
+
+6. For an EVM `exact` payment, connect the UI's CDP EIP-712 signing hook to the
+   x402 exact EVM scheme from `@x402/evm`, then let `@x402/fetch` handle the
+   `402` quote and retry. The signer must expose only the current address and a
+   `signTypedData` callback; do not export or copy a wallet private key into the
+   agent or frontend application state.
 
 The mandatory order is:
 

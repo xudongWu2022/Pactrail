@@ -1126,6 +1126,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         "x-agent-id, x-budget-id, x-session-id"
                     ),
                     "access-control-allow-methods": "GET, POST, OPTIONS",
+                    "access-control-expose-headers": "payment-required, payment-response, x-payment-response",
                 }
             return {}
 
