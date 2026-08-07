@@ -1,0 +1,40 @@
+{
+  "gateway_tokens": ["replace-with-a-local-demo-token"],
+  "rails": ["api_x402"],
+  "budgets": {
+    "team-research": 2.0
+  },
+  "max_amount": 1.0,
+  "agents": {
+    "research-bot": {
+      "budgets": ["team-research"],
+      "rails": ["api_x402"],
+      "max_amount": 0.25
+    }
+  },
+  "x402_resources": {
+    "sandbox-search": {
+      "url": "http://127.0.0.1:8788/paid/search",
+      "resource_url": "http://127.0.0.1:8787/x402/sandbox-search",
+      "method": "POST",
+      "description": "Local x402 sandbox search; no real asset transfer",
+      "merchant": "local-x402-sandbox",
+      "agent": "research-bot",
+      "budget": "team-research",
+      "amount": 0.1,
+      "amount_units": "100000",
+      "asset": "0x0000000000000000000000000000000000000001",
+      "asset_name": "Sandbox USDC",
+      "asset_decimals": 6,
+      "pay_to": "0x000000000000000000000000000000000000dEaD",
+      "network": "eip155:84532",
+      "scheme": "exact",
+      "x402_version": 2,
+      "facilitator_url": "http://127.0.0.1:8788",
+      "preflight_supported": true,
+      "headers": {
+        "content-type": "application/json"
+      }
+    }
+  }
+}

@@ -299,7 +299,7 @@ def validate_policy(policy: dict) -> list[str]:
         "asset_name", "asset_version", "x402_version",
         "pay_to", "network", "scheme", "max_timeout_seconds", "description",
         "mime_type", "budget", "merchant", "service", "facilitator_url",
-        "facilitator_auth_env", "headers", "headers_env", "timeout", "agent",
+        "facilitator_auth_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
     }
 
     if not isinstance(policy, dict):

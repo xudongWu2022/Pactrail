@@ -27,6 +27,37 @@ It exposes `http://127.0.0.1:8788/verify`, `/settle`, and a protected test
 resource at `/paid/search`. Point an `x402_resources` entry's `facilitator_url`
 at `http://127.0.0.1:8788` and its `url` at `http://127.0.0.1:8788/paid/search`.
 
+For a ready-to-run **Base Sepolia-shaped, but fully local** policy, copy
+`gateway.x402-sandbox.example.json`, replace its demo gateway token, then run
+these in separate terminals:
+
+```powershell
+# Terminal A: no chain or wallet credentials are used.
+python -m spend_collector x402-sandbox --port 8788
+
+# Terminal B
+$env:SPEND_GATEWAY_TOKEN = "your-local-demo-token"
+python -m spend_collector gateway --policy gateway.x402-sandbox.example.json --db x402-sandbox.db
+```
+
+An unsigned first request returns a `402 Payment Required` quote. This is the
+exact point where a wallet UI reads the requirements and signs a fresh payment
+payload; it must then retry the same endpoint with `Payment-Signature` and a
+fresh `X-Request-ID`.
+
+```powershell
+curl.exe -i -X POST http://127.0.0.1:8787/x402/sandbox-search `
+  -H "Content-Type: application/json" `
+  -H "X-Agent-ID: research-bot" `
+  -H "X-Budget-ID: team-research" `
+  -d '{"query":"test"}'
+```
+
+The sandbox accepts a structurally valid payload only to exercise the lifecycle;
+it does **not** validate cryptographic signatures or transfer USDC. Use it to
+verify the order `quote -> sign -> verify -> settle -> deliver` before attaching
+a real facilitator and signer.
+
 Preflight a facilitator before enabling it for an x402 resource:
 
 ```bash

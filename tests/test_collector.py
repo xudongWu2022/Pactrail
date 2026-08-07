@@ -556,6 +556,8 @@ class CollectorTest(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=2) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers["access-control-allow-origin"], "http://localhost:3000")
+                self.assertIn("payment-signature", resp.headers["access-control-allow-headers"])
+                self.assertIn("x-agent-id", resp.headers["access-control-allow-headers"])
 
             disallowed = urllib.request.Request(f"http://127.0.0.1:{gateway_port}/health", headers={
                 "origin": "https://untrusted.example",
