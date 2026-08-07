@@ -265,10 +265,15 @@ def _x402_payment_requirements(resource: dict) -> dict:
 def _x402_public_requirements(resource_id: str, resource: dict, requirements: dict) -> dict:
     return {
         "x402Version": int(resource.get("x402_version", 2)),
-        "resource": resource_id,
-        "paymentRequirements": requirements,
-        "description": str(resource.get("description") or resource.get("service") or resource_id),
-        "mimeType": str(resource.get("mime_type", "application/json")),
+        # V2 requires a ResourceInfo object and an accepts array. Do not replace
+        # these with a project-specific resource id: @x402/fetch validates this
+        # exact wire shape before it asks a wallet to sign.
+        "resource": {
+            "url": str(resource.get("resource_url") or resource.get("url") or ""),
+            "description": str(resource.get("description") or resource.get("service") or resource_id),
+            "mimeType": str(resource.get("mime_type", "application/json")),
+        },
+        "accepts": [requirements],
     }
 
 
@@ -1334,9 +1339,16 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
         def _send_x402_required(self, resource_id: str, resource: dict, requirements: dict,
                                 status: int = 402, error: dict | None = None) -> None:
             payload = _x402_public_requirements(resource_id, resource, requirements)
+            header_payload = dict(payload)
             if error:
+                # The header must remain a schema-valid PaymentRequired V2.
+                # Preserve machine-readable failure details in the JSON body.
+                header_payload["error"] = str(error.get("message") or error.get("reason") or "payment failed")
                 payload["error"] = error
-            encoded = json.dumps(payload, separators=(",", ":"))
+            import base64
+            encoded = base64.b64encode(
+                json.dumps(header_payload, separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
             self._send(status, payload, headers={
                 "content-type": "application/json",
                 "payment-required": encoded,

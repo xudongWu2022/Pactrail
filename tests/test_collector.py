@@ -602,12 +602,14 @@ class CollectorTest(unittest.TestCase):
                 urllib.request.urlopen(req, timeout=2)
             self.assertEqual(err.exception.code, 402)
             header = err.exception.headers["payment-required"]
-            required = json.loads(header)
+            import base64
+            required = json.loads(base64.b64decode(header))
             body = json.loads(err.exception.read())
 
-        self.assertEqual(required["paymentRequirements"]["amount"], "1250000")
-        self.assertEqual(required["paymentRequirements"]["payTo"], "0xmerchant")
-        self.assertEqual(body["resource"], "scrape")
+        self.assertEqual(required["accepts"][0]["amount"], "1250000")
+        self.assertEqual(required["accepts"][0]["payTo"], "0xmerchant")
+        self.assertEqual(required["resource"]["url"], "http://127.0.0.1:9/scrape")
+        self.assertEqual(body["resource"]["url"], "http://127.0.0.1:9/scrape")
 
     def test_x402_middleware_verifies_settles_forwards_and_records(self) -> None:
         upstream_calls: list[dict] = []
