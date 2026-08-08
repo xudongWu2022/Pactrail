@@ -1,4 +1,73 @@
-# agent-spend-collector
+# Pactrail — the x402 Spend Control Plane for AI Agents
+
+> Give any Agent a constrained payment capability — never a wallet key.
+
+Pactrail sits between an Agent runtime and its external signer/facilitator. It
+enforces who may spend, how much, where, on which network and under which x402
+scheme; then it records an auditable authorization, usage and settlement receipt.
+Pactrail is self-hosted, MIT-licensed and never custody of a wallet key.
+
+```mermaid
+flowchart LR
+  A[Agent / MCP / workflow] -->|short-lived capability| P[Pactrail gateway]
+  P -->|policy allow + x402 quote| W[External wallet signer]
+  W -->|signed payment| P
+  P --> F[Facilitator]
+  F --> M[Paid API / merchant]
+  P --> R[Receipt + spend ledger]
+```
+
+## Start here: 60-second Base Sepolia payment path
+
+1. Run the safe local facilitator and gateway. The sandbox is the default and
+   transfers no funds; swap in a real Base Sepolia facilitator only after your
+   external signer and test USDC are ready.
+2. An administrator creates a Spend Session and mints a 15-minute capability
+   limited to `research-bot`, `team-research` and approved resources.
+3. Your Python Agent calls `PactrailClient.create_payment_intent()`, signs the
+   returned x402 V2 quote with its external CDP/non-custodial signer, and retries.
+4. Read the receipt. For `upto`, Pactrail records authorization, actual usage,
+   settlement and released balance separately.
+
+Create a session and capability from a trusted admin process (the returned
+capability, not `admin-token`, is what the Agent receives):
+
+```bash
+curl -X POST http://127.0.0.1:8787/sessions \
+  -H 'Authorization: Bearer admin-token' -H 'Content-Type: application/json' \
+  -d '{"parent_task":"research-42","budget_id":"team-research","cap":1.00,"constraints":{"resource_ids":["sandbox-search"]}}'
+
+curl -X POST http://127.0.0.1:8787/capabilities \
+  -H 'Authorization: Bearer admin-token' -H 'Content-Type: application/json' \
+  -d '{"session_id":"ses:...","agent_id":"research-bot","resource_ids":["sandbox-search"]}'
+```
+
+```python
+from pactrail import PactrailClient
+
+client = PactrailClient("http://127.0.0.1:8787", capability, "research-bot", "team-research", session_id)
+intent = client.create_payment_intent("sandbox-search")
+# client.pay_x402(intent, b'{"query":"research"}', external_signer)
+```
+
+The `external_signer` is your wallet integration. It returns a signed x402
+payload; it does not give Pactrail or the Agent a private key. See
+[`examples/pactrail_research_agent.py`](examples/pactrail_research_agent.py).
+
+## Security model
+
+- Gateway management credentials mint, revoke and inspect; they are never given to Agents.
+- Agents receive only an expiring, HMAC-signed Payment Capability bound to one
+  session, agent, budget, resource allowlist, merchant, network, asset and scheme.
+- Session caps count settled spend plus active authorizations, preventing concurrent
+  `upto` requests from overspending before final settlement.
+- Signed payloads are never stored; only a replay fingerprint and safe receipt fields remain.
+
+## Spend Observability
+
+Pactrail also includes the original cross-rail spend collector: LLM, x402, USDC,
+cloud and Stripe costs normalize into one ledger with anomaly detection and a
+local dashboard. It is the observability layer below the payment control plane.
 
 ## Simulate agent spend locally
 

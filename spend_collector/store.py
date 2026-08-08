@@ -31,6 +31,8 @@ class SpendStore:
         self.db.execute(_SPEND_RESERVATIONS_DDL)
         self.db.execute(_X402_PAYMENTS_DDL)
         self.db.execute(_X402_BATCHES_DDL)
+        self.db.execute(_SPEND_SESSIONS_DDL)
+        self.db.execute(_PAYMENT_INTENTS_DDL)
         self._migrate_columns()
 
     def _migrate_columns(self) -> None:
@@ -49,6 +51,9 @@ class SpendStore:
             name = column.split()[0]
             if name not in x402_columns:
                 self.db.execute(f"ALTER TABLE x402_payments ADD COLUMN {column}")
+        decision_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(gateway_decisions)")}
+        if "x_session_id" not in decision_columns:
+            self.db.execute("ALTER TABLE gateway_decisions ADD COLUMN x_session_id TEXT DEFAULT ''")
         self.db.commit()
 
     def close(self) -> None:
@@ -121,7 +126,7 @@ class SpendStore:
             "provider_name": row["provider_name"],
             "service_name": row["service_name"],
             "x_merchant_id": row["x_merchant_id"],
-            "x_session_id": "",
+            "x_session_id": row["x_session_id"] or "",
         }
         return {
             "decision": row["decision"],
@@ -146,9 +151,9 @@ class SpendStore:
                                 reservation_id: str = "", now: str | None = None) -> None:
         self.db.execute(
             "INSERT OR IGNORE INTO gateway_decisions (decision_id, request_id, created_at, "
-            "x_agent_id, rail, provider_name, service_name, x_merchant_id, amount, x_budget_id, "
+            "x_agent_id, rail, provider_name, service_name, x_merchant_id, x_session_id, amount, x_budget_id, "
             "decision, reasons_json, route_type, route_id, reservation_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 f"gwd:{request_id}",
                 request_id,
@@ -158,6 +163,7 @@ class SpendStore:
                 req.provider_name,
                 req.service_name,
                 req.x_merchant_id,
+                req.x_session_id,
                 req.amount,
                 req.x_budget_id,
                 decision,
@@ -297,6 +303,57 @@ class SpendStore:
     def x402_batch(self, batch_id: str):
         return self.db.execute("SELECT * FROM x402_batches WHERE batch_id = ?", (batch_id,)).fetchone()
 
+    def create_spend_session(self, *, parent_task: str, budget_id: str, cap: float,
+                             expires_at: str, constraints: dict) -> dict:
+        session_id = f"ses:{uuid.uuid4().hex}"
+        now = _now()
+        self.db.execute(
+            "INSERT INTO spend_sessions (session_id, parent_task, budget_id, cap, expires_at, status, "
+            "constraints_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+            (session_id, parent_task, budget_id, cap, expires_at, json.dumps(constraints, sort_keys=True), now, now),
+        )
+        self.db.commit()
+        return self.spend_session(session_id) or {}
+
+    def spend_session(self, session_id: str):
+        return self.db.execute("SELECT * FROM spend_sessions WHERE session_id = ?", (session_id,)).fetchone()
+
+    def revoke_spend_session(self, session_id: str) -> int:
+        before = self.db.total_changes
+        self.db.execute("UPDATE spend_sessions SET status = 'revoked', updated_at = ? WHERE session_id = ?", (_now(), session_id))
+        self.db.commit()
+        return self.db.total_changes - before
+
+    def session_balance(self, session_id: str, now: str | None = None) -> tuple[float, float]:
+        now = now or _now()
+        spent = self.db.execute(
+            "SELECT COALESCE(SUM(billed_cost), 0) AS total FROM spend_events WHERE x_session_id = ?", (session_id,)
+        ).fetchone()["total"] or 0
+        reserved = self.db.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM spend_reservations "
+            "WHERE request_id IN (SELECT request_id FROM gateway_decisions WHERE x_session_id = ?) "
+            "AND status = 'active' AND expires_at > ?", (session_id, now)
+        ).fetchone()["total"] or 0
+        return float(spent), float(reserved)
+
+    def create_payment_intent(self, *, request_id: str, session_id: str, resource_id: str,
+                              agent_id: str, budget_id: str) -> dict:
+        now = _now()
+        self.db.execute(
+            "INSERT INTO payment_intents (request_id, session_id, resource_id, agent_id, budget_id, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'approved', ?, ?)",
+            (request_id, session_id, resource_id, agent_id, budget_id, now, now),
+        )
+        self.db.commit()
+        return self.payment_intent(request_id) or {}
+
+    def update_payment_intent(self, request_id: str, status: str) -> None:
+        self.db.execute("UPDATE payment_intents SET status = ?, updated_at = ? WHERE request_id = ?", (status, _now(), request_id))
+        self.db.commit()
+
+    def payment_intent(self, request_id: str):
+        return self.db.execute("SELECT * FROM payment_intents WHERE request_id = ?", (request_id,)).fetchone()
+
     def x402_payment(self, request_id: str):
         return self.db.execute("SELECT * FROM x402_payments WHERE request_id = ?", (request_id,)).fetchone()
 
@@ -304,7 +361,8 @@ class SpendStore:
                                             reasons: list[str], route_type: str = "guard",
                                             route_id: str = "", ttl_seconds: int = 900,
                                             cap: float | None = None,
-                                            rate_cap: float | None = None) -> tuple[str, str]:
+                                            rate_cap: float | None = None,
+                                            session_cap: float | None = None) -> tuple[str, str]:
         """Atomically record a decision and, for allow, hold budget.
 
         Returns (decision, reservation_id). Duplicate request IDs return the
@@ -322,7 +380,24 @@ class SpendStore:
             final_reasons = list(reasons)
             reservation_id = ""
             if decision == "allow":
-                if cap is not None:
+                if session_cap is not None and req.x_session_id:
+                    session_spent = self.db.execute(
+                        "SELECT COALESCE(SUM(billed_cost), 0) AS spent FROM spend_events WHERE x_session_id = ?",
+                        (req.x_session_id,),
+                    ).fetchone()["spent"] or 0
+                    session_reserved = self.db.execute(
+                        "SELECT COALESCE(SUM(r.amount), 0) AS reserved FROM spend_reservations r "
+                        "JOIN gateway_decisions d ON d.request_id = r.request_id "
+                        "WHERE d.x_session_id = ? AND r.status = 'active' AND r.expires_at > ?",
+                        (req.x_session_id, now),
+                    ).fetchone()["reserved"] or 0
+                    if float(session_spent) + float(session_reserved) + req.amount > float(session_cap):
+                        final_decision = "deny"
+                        final_reasons = [f"session {req.x_session_id} would exceed cap "
+                                         f"{float(session_spent) + float(session_reserved) + req.amount:.2f}/{float(session_cap):.2f}"]
+                if final_decision != "allow":
+                    reservation_id = ""
+                elif cap is not None:
                     spent = self.db.execute(
                         "SELECT COALESCE(SUM(billed_cost), 0) AS spent FROM spend_events WHERE x_budget_id = ?",
                         (req.x_budget_id,),
@@ -377,9 +452,9 @@ class SpendStore:
 
             self.db.execute(
                 "INSERT INTO gateway_decisions (decision_id, request_id, created_at, "
-                "x_agent_id, rail, provider_name, service_name, x_merchant_id, amount, x_budget_id, "
+                "x_agent_id, rail, provider_name, service_name, x_merchant_id, x_session_id, amount, x_budget_id, "
                 "decision, reasons_json, route_type, route_id, reservation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     f"gwd:{request_id}",
                     request_id,
@@ -389,6 +464,7 @@ class SpendStore:
                     req.provider_name,
                     req.service_name,
                     req.x_merchant_id,
+                    req.x_session_id,
                     req.amount,
                     req.x_budget_id,
                     final_decision,
@@ -413,7 +489,7 @@ _GATEWAY_DECISIONS_DDL = (
     "CREATE TABLE IF NOT EXISTS gateway_decisions ("
     "decision_id TEXT PRIMARY KEY, request_id TEXT UNIQUE, created_at TEXT, "
     "x_agent_id TEXT, rail TEXT, provider_name TEXT, service_name TEXT, "
-    "x_merchant_id TEXT, amount REAL, x_budget_id TEXT, decision TEXT, "
+    "x_merchant_id TEXT, x_session_id TEXT DEFAULT '', amount REAL, x_budget_id TEXT, decision TEXT, "
     "reasons_json TEXT, route_type TEXT, route_id TEXT, reservation_id TEXT)"
 )
 
@@ -435,4 +511,16 @@ _X402_BATCHES_DDL = (
     "CREATE TABLE IF NOT EXISTS x402_batches ("
     "batch_id TEXT PRIMARY KEY, resource_id TEXT, status TEXT, authorization_limit_units TEXT, "
     "reserved_units TEXT, usage_units TEXT, settled_units TEXT, created_at TEXT, updated_at TEXT)"
+)
+
+_SPEND_SESSIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS spend_sessions ("
+    "session_id TEXT PRIMARY KEY, parent_task TEXT, budget_id TEXT, cap REAL, expires_at TEXT, status TEXT, "
+    "constraints_json TEXT, created_at TEXT, updated_at TEXT)"
+)
+
+_PAYMENT_INTENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS payment_intents ("
+    "request_id TEXT PRIMARY KEY, session_id TEXT, resource_id TEXT, agent_id TEXT, budget_id TEXT, "
+    "status TEXT, created_at TEXT, updated_at TEXT)"
 )

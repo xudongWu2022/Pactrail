@@ -1,7 +1,7 @@
 [project]
-name = "spend-collector"
+name = "pactrail"
 version = "0.1.0"
-description = "Read-only cross-rail agent spend collector (LLM token + x402 + Stripe -> one FOCUS-shaped ledger)"
+description = "Pactrail: the x402 spend control plane for AI agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -30,13 +30,14 @@ pricing = ["tokencost"]  # real/maintained model pricing (else the tiny static p
 
 [project.scripts]
 spend-collector = "spend_collector.__main__:main"
+pactrail = "spend_collector.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["spend_collector"]
+packages = ["spend_collector", "pactrail"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "fixtures" = "fixtures"

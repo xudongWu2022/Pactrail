@@ -280,6 +280,7 @@ def validate_policy(policy: dict) -> list[str]:
         "max_amount_per_hour", "max_request_bytes", "warn_new_merchants",
         "deny_new_merchants", "agents", "merchants", "targets", "providers",
         "gateway_tokens", "reservation_ttl_seconds", "x402_resources",
+        "capability_secret_env",
         "content_guard", "frozen_agents", "frozen_budgets", "block_on_anomaly",
         "block_on_anomaly_lookback_hours",
     }

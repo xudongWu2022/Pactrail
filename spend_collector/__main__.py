@@ -9,11 +9,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from .adapters import from_llm_usage, from_stripe_events, from_usdc_transfers, from_x402_settlements
 from .detectors import run_all
@@ -39,6 +41,7 @@ from .store import SpendStore
 from .facilitator import FacilitatorError, require_supported
 from .bazaar import approved_gateway_resources, fetch_resources, filter_resources
 from .x402_sandbox import x402_sandbox
+from .capabilities import CapabilityError, mint_capability, verify_capability
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURES = _ROOT / "fixtures"
@@ -975,7 +978,7 @@ def _request_id(value: str | None = None) -> str:
 
 def _decide_and_record(store: SpendStore, policy: dict, req: GuardRequest, *,
                        request_id: str | None = None, route_type: str = "guard",
-                       route_id: str = "") -> dict:
+                       route_id: str = "", session_cap: float | None = None) -> dict:
     request_id = _request_id(request_id)
     existing = store.gateway_decision_as_dict(request_id)
     if existing:
@@ -994,6 +997,7 @@ def _decide_and_record(store: SpendStore, policy: dict, req: GuardRequest, *,
         ttl_seconds=ttl,
         cap=cap,
         rate_cap=rate_cap,
+        session_cap=session_cap,
     )
     return store.gateway_decision_as_dict(request_id) or decision.as_dict()
 
@@ -1274,6 +1278,40 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             supplied = str(supplied)
             return any(hmac.compare_digest(supplied, str(t)) for t in tokens)
 
+        def _capability_secret(self, policy: dict) -> str:
+            return os.environ.get(str(policy.get("capability_secret_env", "PACTRAIL_CAPABILITY_SECRET")), "")
+
+        def _capability_claims(self, policy: dict) -> dict:
+            secret = self._capability_secret(policy)
+            auth = self.headers.get("authorization", "")
+            token = auth.removeprefix("Capability ").strip() if auth.startswith("Capability ") else ""
+            if not secret or not token:
+                raise CapabilityError("missing payment capability")
+            claims = verify_capability(token, secret)
+            with SpendStore(str(db_path)) as store:
+                session = store.spend_session(str(claims.get("session_id", "")))
+            if session is None or session["status"] != "active" or session["expires_at"] <= datetime.now(timezone.utc).isoformat():
+                raise CapabilityError("payment capability session is inactive or expired")
+            return claims
+
+        @staticmethod
+        def _claim_allows(claims: dict, resource_id: str, resource: dict, *, agent: str, budget: str) -> str | None:
+            if claims.get("agent_id") != agent or claims.get("budget_id") != budget:
+                return "capability is not valid for this agent or budget"
+            if resource_id not in set(claims.get("resource_ids", [])):
+                return "capability does not allow this resource"
+            checks = {
+                "merchants": str(resource.get("merchant") or resource.get("pay_to", "")),
+                "networks": str(resource.get("network", "")),
+                "assets": str(resource.get("asset", "")),
+                "schemes": _x402_scheme(resource),
+            }
+            for key, actual in checks.items():
+                allowed = claims.get(key, [])
+                if allowed and actual not in allowed:
+                    return f"capability does not allow {key[:-1]} {actual}"
+            return None
+
         def _guard_request(self, payload: dict) -> GuardRequest:
             return GuardRequest(
                 x_agent_id=str(payload["agent"]),
@@ -1410,6 +1448,24 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             resource_id, resource = route
             body = self._read_raw(policy)
             guard_payload = self._x402_guard_payload(resource_id, resource)
+            claims = None
+            session_cap = None
+            if self._capability_secret(policy):
+                try:
+                    claims = self._capability_claims(policy)
+                except CapabilityError as exc:
+                    self._send(401, {"error": "invalid_payment_capability", "detail": str(exc)})
+                    return True
+                capability_error = self._claim_allows(
+                    claims, resource_id, resource, agent=str(guard_payload["agent"]), budget=str(guard_payload["budget"]),
+                )
+                if capability_error:
+                    self._send(403, {"error": "payment_capability_denied", "detail": capability_error})
+                    return True
+                guard_payload["session"] = str(claims["session_id"])
+                with SpendStore(str(db_path)) as store:
+                    session = store.spend_session(str(claims["session_id"]))
+                session_cap = float(session["cap"]) if session is not None else None
             content_reasons = inspect_content(body, policy)
             if content_reasons:
                 with SpendStore(str(db_path)) as store:
@@ -1463,10 +1519,17 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     request_id=request_id,
                     route_type="x402",
                     route_id=resource_id,
+                    session_cap=session_cap,
                 )
             if not decision["allowed"]:
+                with SpendStore(str(db_path)) as store:
+                    if store.payment_intent(request_id):
+                        store.update_payment_intent(request_id, "denied")
                 self._send(403, decision)
                 return True
+            with SpendStore(str(db_path)) as store:
+                if store.payment_intent(request_id):
+                    store.update_payment_intent(request_id, "executing")
 
             payment_payload = _decode_x402_header(payment_header)
             binding_errors = _x402_payment_binding_errors(payment_payload, requirements, resource)
@@ -1620,6 +1683,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 raise
             with SpendStore(str(db_path)) as store:
                 store.update_x402_payment(request_id, "delivered")
+                if store.payment_intent(request_id):
+                    store.update_payment_intent(request_id, "delivered")
             return True
 
         def _forward(self, target: dict, payload: dict,
@@ -1764,12 +1829,19 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 return
             if parsed.path.startswith("/x402/payments/"):
                 policy = _load_policy(policy_path)
-                if not self._authorized(policy):
-                    self._send(401, {"error": "unauthorized"})
-                    return
                 request_id = parsed.path.rsplit("/", 1)[-1]
                 with SpendStore(str(db_path)) as store:
                     payment = store.x402_payment(request_id)
+                    intent = store.payment_intent(request_id)
+                if not self._authorized(policy):
+                    try:
+                        claims = self._capability_claims(policy)
+                    except CapabilityError as exc:
+                        self._send(401, {"error": "unauthorized", "detail": str(exc)})
+                        return
+                    if intent is None or intent["session_id"] != claims.get("session_id"):
+                        self._send(403, {"error": "payment_capability_denied"})
+                        return
                 if payment is None:
                     self._send(404, {"error": "x402_payment_not_found", "request_id": request_id})
                 else:
@@ -1778,8 +1850,11 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if parsed.path.startswith("/x402/batches/"):
                 policy = _load_policy(policy_path)
                 if not self._authorized(policy):
-                    self._send(401, {"error": "unauthorized"})
-                    return
+                    try:
+                        self._capability_claims(policy)
+                    except CapabilityError as exc:
+                        self._send(401, {"error": "unauthorized", "detail": str(exc)})
+                        return
                 batch_id = parsed.path.rsplit("/", 1)[-1]
                 with SpendStore(str(db_path)) as store:
                     batch = store.x402_batch(batch_id)
@@ -1799,8 +1874,93 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 if self._handle_x402(policy):
                     return
                 payload = self._read_json(policy)
+                if self.path == "/payment-intents":
+                    try:
+                        claims = self._capability_claims(policy)
+                    except CapabilityError as exc:
+                        self._send(401, {"error": "invalid_payment_capability", "detail": str(exc)})
+                        return
+                    resource_id = str(payload.get("resource_id", ""))
+                    resource = policy.get("x402_resources", {}).get(resource_id)
+                    if not isinstance(resource, dict):
+                        self._send(404, {"error": "x402_resource_not_found", "resource_id": resource_id})
+                        return
+                    error = self._claim_allows(claims, resource_id, resource,
+                                               agent=str(claims.get("agent_id", "")),
+                                               budget=str(claims.get("budget_id", "")))
+                    if error:
+                        self._send(403, {"error": "payment_capability_denied", "detail": error})
+                        return
+                    request_id = _request_id()
+                    with SpendStore(str(db_path)) as store:
+                        intent = store.create_payment_intent(
+                            request_id=request_id, session_id=str(claims["session_id"]), resource_id=resource_id,
+                            agent_id=str(claims["agent_id"]), budget_id=str(claims["budget_id"]),
+                        )
+                    self._send(201, {**intent, "resource_url": f"/x402/{resource_id}"})
+                    return
                 if not self._authorized(policy):
                     self._send(401, {"error": "unauthorized"})
+                    return
+                if self.path == "/sessions":
+                    cap = float(payload["cap"])
+                    ttl = int(payload.get("expires_in_seconds", 3600))
+                    if cap <= 0 or not 1 <= ttl <= 86400:
+                        self._send(400, {"error": "invalid_session_cap_or_ttl"})
+                        return
+                    constraints = payload.get("constraints") or {}
+                    if not isinstance(constraints, dict):
+                        self._send(400, {"error": "invalid_session_constraints"})
+                        return
+                    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+                    with SpendStore(str(db_path)) as store:
+                        session = store.create_spend_session(
+                            parent_task=str(payload.get("parent_task", "")), budget_id=str(payload["budget_id"]),
+                            cap=cap, expires_at=expires_at, constraints=constraints,
+                        )
+                    self._send(201, {key: session[key] for key in session.keys()})
+                    return
+                if self.path == "/capabilities":
+                    secret = self._capability_secret(policy)
+                    if not secret:
+                        self._send(503, {"error": "capability_secret_not_configured"})
+                        return
+                    session_id = str(payload["session_id"])
+                    with SpendStore(str(db_path)) as store:
+                        session = store.spend_session(session_id)
+                    if session is None or session["status"] != "active":
+                        self._send(404, {"error": "spend_session_not_found", "session_id": session_id})
+                        return
+                    ttl = min(int(payload.get("expires_in_seconds", 900)), 3600)
+                    session_constraints = json.loads(session["constraints_json"] or "{}")
+                    requested = {
+                        "resource_ids": list(payload.get("resource_ids") or session_constraints.get("resource_ids") or []),
+                        "merchants": list(payload.get("merchants") or session_constraints.get("merchants") or []),
+                        "networks": list(payload.get("networks") or session_constraints.get("networks") or []),
+                        "assets": list(payload.get("assets") or session_constraints.get("assets") or []),
+                        "schemes": list(payload.get("schemes") or session_constraints.get("schemes") or []),
+                    }
+                    for key, values in requested.items():
+                        allowed = session_constraints.get(key) or []
+                        if allowed and not set(values).issubset(set(allowed)):
+                            self._send(403, {"error": "payment_capability_exceeds_session", "field": key})
+                            return
+                    claims = {
+                        "session_id": session_id, "agent_id": str(payload["agent_id"]),
+                        "budget_id": str(payload.get("budget_id", session["budget_id"])),
+                        **requested,
+                        "exp": min(int(time.time()) + ttl, int(datetime.fromisoformat(session["expires_at"]).timestamp())),
+                    }
+                    if not claims["resource_ids"]:
+                        self._send(400, {"error": "payment_capability_requires_resource_ids"})
+                        return
+                    self._send(201, {"capability": mint_capability(claims, secret), "claims": claims})
+                    return
+                if self.path.startswith("/sessions/") and self.path.endswith("/revoke"):
+                    session_id = self.path.removeprefix("/sessions/").removesuffix("/revoke").strip("/")
+                    with SpendStore(str(db_path)) as store:
+                        revoked = store.revoke_spend_session(session_id)
+                    self._send(200 if revoked else 404, {"session_id": session_id, "revoked": bool(revoked)})
                     return
                 if self.path == "/reservations/release":
                     request_id = str(payload["request_id"])
