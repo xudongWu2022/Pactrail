@@ -29,6 +29,17 @@ flowchart LR
 4. Read the receipt. For `upto`, Pactrail records authorization, actual usage,
    settlement and released balance separately.
 
+For the whole zero-fund flow in one command (gateway, capability, intent,
+external-signature adapter and receipt), run:
+
+```bash
+python examples/run_pactrail_sandbox_demo.py
+```
+
+It uses a local facilitator and mock external signer solely for sandbox
+development. Replace only that signer adapter when you opt into the real Base
+Sepolia acceptance path.
+
 Create a session and capability from a trusted admin process (the returned
 capability, not `admin-token`, is what the Agent receives):
 
