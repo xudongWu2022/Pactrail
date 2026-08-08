@@ -747,6 +747,7 @@ class CollectorTest(unittest.TestCase):
                 out = b'{"paid": true}'
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
+                self.send_header("access-control-allow-origin", "*")
                 self.send_header("content-length", str(len(out)))
                 self.end_headers()
                 self.wfile.write(out)
@@ -894,6 +895,7 @@ class CollectorTest(unittest.TestCase):
                     "x-agent-id": "research-bot",
                     "x-budget-id": "team-research",
                     "x-request-id": "x402-req-1",
+                    "origin": "http://localhost:3000",
                 },
                 method="POST",
             )
@@ -902,6 +904,7 @@ class CollectorTest(unittest.TestCase):
                 self.assertEqual(json.load(resp), {"paid": True})
                 payment_response = json.loads(resp.headers["payment-response"])
                 self.assertEqual(resp.headers["x-pactrail-request-id"], "x402-req-1")
+                self.assertEqual(resp.headers.get_all("access-control-allow-origin"), ["http://localhost:3000"])
 
             duplicate_req = urllib.request.Request(
                 f"http://127.0.0.1:{gateway_port}/x402/scrape",

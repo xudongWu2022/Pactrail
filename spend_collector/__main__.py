@@ -1205,7 +1205,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             is_stream = _is_event_stream(content_type)
             self.send_response(resp.status)
             for key, value in headers.items():
-                if key.lower() in {"connection", "content-length", "transfer-encoding"}:
+                # The gateway owns CORS for its browser approval UI. Forwarding
+                # an upstream Access-Control-* value as well would produce a
+                # multi-value CORS header that browsers reject.
+                if key.lower() in {"connection", "content-length", "transfer-encoding"} or key.lower().startswith("access-control-"):
                     continue
                 self.send_header(key, value)
             for key, value in (extra_headers or {}).items():
