@@ -120,3 +120,7 @@ class PactrailTest(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(receipt["status"], "delivered")
             self.assertEqual(receipt["request_id"], intent.request_id)
+            self.assertEqual(receipt["session_id"], session["session_id"])
+            self.assertEqual(receipt["agent_id"], "research-bot")
+            self.assertEqual(receipt["budget_id"], "team")
+            self.assertEqual(receipt["intent_status"], "delivered")

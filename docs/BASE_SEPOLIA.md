@@ -13,9 +13,10 @@ unbounded wallet for this demo.
 4. Use the separate CDP non-custodial UI or another external x402 signer to sign
    the quote produced by `PactrailClient`. Never put wallet keys in the Python
    SDK, policy file or Agent environment.
-5. Verify the safe Pactrail receipt and the facilitator/chain transaction
-   reference. For `upto`, verify that authorization, usage, settlement and
-   release values agree before treating the run as accepted.
+5. Verify the safe Pactrail receipt: it includes request, session, agent,
+   budget, scheme, authorization, usage, settlement, and facilitator/chain
+   transaction reference. For `upto`, verify that authorization, usage,
+   settlement and release values agree before treating the run as accepted.
 
 The normal test suite uses only the local sandbox. A real testnet transaction is
 an operator-run acceptance check, not CI.

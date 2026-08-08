@@ -1846,7 +1846,19 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 if payment is None:
                     self._send(404, {"error": "x402_payment_not_found", "request_id": request_id})
                 else:
-                    self._send(200, {key: payment[key] for key in payment.keys() if key != "payment_fingerprint"})
+                    receipt = {key: payment[key] for key in payment.keys() if key != "payment_fingerprint"}
+                    # A receipt is useful to an Agent only if it can be joined
+                    # directly to its task and constrained spending authority.
+                    # Keep this limited to safe intent metadata, never claims or
+                    # signatures.
+                    if intent is not None:
+                        receipt.update({
+                            "session_id": intent["session_id"],
+                            "agent_id": intent["agent_id"],
+                            "budget_id": intent["budget_id"],
+                            "intent_status": intent["status"],
+                        })
+                    self._send(200, receipt)
                 return
             if parsed.path.startswith("/x402/batches/"):
                 policy = _load_policy(policy_path)
