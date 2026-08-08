@@ -63,6 +63,11 @@ payload; it does not give Pactrail or the Agent a private key. See
   `upto` requests from overspending before final settlement.
 - Signed payloads are never stored; only a replay fingerprint and safe receipt fields remain.
 
+For the optional independent CDP wallet demonstration, see
+[`docs/CDP_WALLET_CAPABILITY_DEMO.md`](docs/CDP_WALLET_CAPABILITY_DEMO.md). It
+shows how an operator mints a short-lived capability without putting a gateway
+administrator credential or wallet key into the browser.
+
 ## Spend Observability
 
 Pactrail also includes the original cross-rail spend collector: LLM, x402, USDC,
