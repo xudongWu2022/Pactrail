@@ -1312,6 +1312,21 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     return f"capability does not allow {key[:-1]} {actual}"
             return None
 
+        @staticmethod
+        def _resource_capability_constraints(policy: dict, resource_ids: list[str]) -> tuple[dict[str, list[str]], str | None]:
+            """Freeze every non-secret payment property into a minted capability."""
+            values = {"merchants": set(), "networks": set(), "assets": set(), "schemes": set()}
+            resources = policy.get("x402_resources", {})
+            for resource_id in resource_ids:
+                resource = resources.get(resource_id)
+                if not isinstance(resource, dict):
+                    return {}, resource_id
+                values["merchants"].add(str(resource.get("merchant") or resource.get("pay_to", "")))
+                values["networks"].add(str(resource.get("network", "")))
+                values["assets"].add(str(resource.get("asset", "")))
+                values["schemes"].add(_x402_scheme(resource))
+            return {key: sorted(value for value in options if value) for key, options in values.items()}, None
+
         def _guard_request(self, payload: dict) -> GuardRequest:
             return GuardRequest(
                 x_agent_id=str(payload["agent"]),
@@ -1949,13 +1964,22 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         return
                     ttl = min(int(payload.get("expires_in_seconds", 900)), 3600)
                     session_constraints = json.loads(session["constraints_json"] or "{}")
-                    requested = {
-                        "resource_ids": list(payload.get("resource_ids") or session_constraints.get("resource_ids") or []),
-                        "merchants": list(payload.get("merchants") or session_constraints.get("merchants") or []),
-                        "networks": list(payload.get("networks") or session_constraints.get("networks") or []),
-                        "assets": list(payload.get("assets") or session_constraints.get("assets") or []),
-                        "schemes": list(payload.get("schemes") or session_constraints.get("schemes") or []),
-                    }
+                    resource_ids = list(payload.get("resource_ids") or session_constraints.get("resource_ids") or [])
+                    if not resource_ids:
+                        self._send(400, {"error": "payment_capability_requires_resource_ids"})
+                        return
+                    derived, missing_resource = self._resource_capability_constraints(policy, resource_ids)
+                    if missing_resource:
+                        self._send(404, {"error": "x402_resource_not_found", "resource_id": missing_resource})
+                        return
+                    requested = {"resource_ids": resource_ids}
+                    for key, allowed_by_resource in derived.items():
+                        explicit = list(payload.get(key) or [])
+                        if explicit and not set(explicit).issubset(set(allowed_by_resource)):
+                            self._send(400, {"error": "payment_capability_invalid_resource_constraint", "field": key})
+                            return
+                        # Default to properties derived from the selected resources.
+                        requested[key] = explicit or allowed_by_resource
                     for key, values in requested.items():
                         allowed = session_constraints.get(key) or []
                         if allowed and not set(values).issubset(set(allowed)):
@@ -1967,9 +1991,6 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         **requested,
                         "exp": min(int(time.time()) + ttl, int(datetime.fromisoformat(session["expires_at"]).timestamp())),
                     }
-                    if not claims["resource_ids"]:
-                        self._send(400, {"error": "payment_capability_requires_resource_ids"})
-                        return
                     self._send(201, {"capability": mint_capability(claims, secret), "claims": claims})
                     return
                 if self.path.startswith("/sessions/") and self.path.endswith("/revoke"):

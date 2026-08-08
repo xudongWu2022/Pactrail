@@ -59,12 +59,16 @@ class PactrailTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 post("/capabilities", {"session_id": session["session_id"], "agent_id": "research-bot",
                                         "resource_ids": ["other"]}, "Bearer admin-token")
-            self.assertEqual(error.exception.code, 403)
+            self.assertEqual(error.exception.code, 404)
             status, minted = post("/capabilities", {
                 "session_id": session["session_id"], "agent_id": "research-bot", "resource_ids": ["research"],
                 "networks": ["eip155:84532"], "assets": ["0xUSDC"], "schemes": ["exact"],
             }, "Bearer admin-token")
             self.assertEqual(status, 201)
+            self.assertEqual(minted["claims"]["merchants"], ["0xmerchant"])
+            self.assertEqual(minted["claims"]["networks"], ["eip155:84532"])
+            self.assertEqual(minted["claims"]["assets"], ["0xUSDC"])
+            self.assertEqual(minted["claims"]["schemes"], ["exact"])
             status, intent = post("/payment-intents", {"resource_id": "research"}, f"Capability {minted['capability']}")
             self.assertEqual(status, 201)
             self.assertEqual(intent["session_id"], session["session_id"])
