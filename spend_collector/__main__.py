@@ -1131,7 +1131,9 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         "x-agent-id, x-budget-id, x-session-id, access-control-expose-headers"
                     ),
                     "access-control-allow-methods": "GET, POST, OPTIONS",
-                    "access-control-expose-headers": "payment-required, payment-response, x-payment-response",
+                    "access-control-expose-headers": (
+                        "payment-required, payment-response, x-payment-response, x-pactrail-request-id"
+                    ),
                 }
             return {}
 
@@ -1354,7 +1356,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 "payment-required": encoded,
             })
 
-        def _forward_x402_resource(self, resource: dict, payment_response: dict) -> None:
+        def _forward_x402_resource(self, resource: dict, payment_response: dict, request_id: str) -> None:
             body = getattr(self, "_raw_body", b"")
             method = str(resource.get("method", self.command)).upper()
             data = None if method == "GET" else body
@@ -1369,6 +1371,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 self._send_upstream(resp, extra_headers={
                     "payment-response": payment_header,
                     "x-payment-response": payment_header,
+                    "x-pactrail-request-id": request_id,
                 })
 
         def _handle_x402(self, policy: dict) -> bool:
@@ -1521,7 +1524,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 )
             self._raw_body = body
             try:
-                self._forward_x402_resource(resource, settle_result)
+                self._forward_x402_resource(resource, settle_result, request_id)
             except (urllib.error.URLError, OSError) as exc:
                 with SpendStore(str(db_path)) as store:
                     store.update_x402_payment(request_id, "delivery_failed", detail=str(exc))

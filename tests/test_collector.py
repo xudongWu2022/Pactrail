@@ -560,6 +560,7 @@ class CollectorTest(unittest.TestCase):
                 self.assertIn("x-agent-id", resp.headers["access-control-allow-headers"])
                 self.assertIn("access-control-expose-headers", resp.headers["access-control-allow-headers"])
                 self.assertIn("payment-required", resp.headers["access-control-expose-headers"])
+                self.assertIn("x-pactrail-request-id", resp.headers["access-control-expose-headers"])
 
             disallowed = urllib.request.Request(f"http://127.0.0.1:{gateway_port}/health", headers={
                 "origin": "https://untrusted.example",
@@ -773,6 +774,7 @@ class CollectorTest(unittest.TestCase):
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(json.load(resp), {"paid": True})
                 payment_response = json.loads(resp.headers["payment-response"])
+                self.assertEqual(resp.headers["x-pactrail-request-id"], "x402-req-1")
 
             duplicate_req = urllib.request.Request(
                 f"http://127.0.0.1:{gateway_port}/x402/scrape",

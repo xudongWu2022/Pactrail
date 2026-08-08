@@ -17,6 +17,11 @@ lifecycle record (it excludes the signed payment payload):
 curl http://127.0.0.1:8787/x402/payments/<request-id>
 ```
 
+On a successful protected-resource response, the gateway also returns
+`X-Pactrail-Request-ID`. Store that ID with the agent's work record and query
+the endpoint above to audit the final `verified -> settled -> delivered`
+lifecycle. This is a gateway receipt, not a blockchain transaction hash.
+
 Run a local x402 sandbox before connecting a real facilitator or wallet:
 
 ```bash
