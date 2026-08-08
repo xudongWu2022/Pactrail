@@ -14,6 +14,7 @@ import urllib.request
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from spend_collector.__main__ import (
     _alert_payload, _alert_platform, _alert_row, _format_alert, _is_event_stream,
@@ -40,7 +41,7 @@ from spend_collector.sources import (
 )
 from spend_collector.store import SpendStore
 from spend_collector.x402_sandbox import make_x402_sandbox
-from spend_collector.facilitator import require_supported
+from spend_collector.facilitator import cdp_cli_x402, require_supported
 from spend_collector.bazaar import approved_gateway_resources, filter_resources
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -159,6 +160,29 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(_x402_settlement_units({"extra": {"chargedAmount": "18000"}}, "100000", "upto"), "18000")
         with self.assertRaisesRegex(ValueError, "must equal"):
             _x402_settlement_units({"amount": "18000"}, "100000", "exact")
+
+    def test_cdp_cli_facilitator_uses_operator_cli_without_key_material(self) -> None:
+        supported = {"kinds": [{"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}]}
+        with patch("spend_collector.facilitator.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = json.dumps(supported)
+            self.assertEqual(
+                require_supported("https://api.cdp.coinbase.com/platform/v2/x402", version=2,
+                                  scheme="exact", network="eip155:84532", mode="cdp-cli", cdp_environment="live"),
+                supported,
+            )
+            self.assertEqual(run.call_args.args[0], ["cdp", "--env", "live", "x402", "supported"])
+
+        with patch("spend_collector.facilitator.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = '{"isValid":true}'
+            response = cdp_cli_x402("verify", {"x402Version": 2, "paymentPayload": {"a": 1},
+                                                  "paymentRequirements": {"b": 2}}, environment="live")
+            self.assertTrue(response["isValid"])
+            command = run.call_args.args[0]
+            self.assertEqual(command[:5], ["cdp", "--env", "live", "x402", "verify"])
+            self.assertIn('paymentPayload:={"a":1}', command)
+            self.assertIn('paymentRequirements:={"b":2}', command)
 
     def test_store_migrates_legacy_x402_payment_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

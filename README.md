@@ -65,6 +65,11 @@ The `external_signer` is your wallet integration. It returns a signed x402
 payload; it does not give Pactrail or the Agent a private key. See
 [`examples/pactrail_research_agent.py`](examples/pactrail_research_agent.py).
 
+For a real Base Sepolia run with the official facilitator, Pactrail can use the
+operator's already-authenticated local CDP CLI for `supported`, `verify`, and
+`settle`. This keeps CDP API credentials outside the gateway policy, SDK and
+Agent process; see [`docs/BASE_SEPOLIA.md`](docs/BASE_SEPOLIA.md).
+
 ## Security model
 
 - Gateway management credentials mint, revoke and inspect; they are never given to Agents.

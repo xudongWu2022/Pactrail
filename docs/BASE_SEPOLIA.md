@@ -8,6 +8,14 @@ unbounded wallet for this demo.
    only in the gateway environment. Configure an x402 resource with the real
    Base Sepolia USDC address, an approved `pay_to`, `network: eip155:84532`,
    and a facilitator that preflights the selected V2 scheme.
+
+   When the operator already authenticated the official CDP CLI locally, the
+   resource can use `"facilitator_mode": "cdp-cli"` and
+   `"facilitator_cdp_env": "live"` with
+   `"facilitator_url": "https://api.cdp.coinbase.com/platform/v2/x402"`.
+   Pactrail then invokes `cdp x402 supported`, `verify`, and `settle` locally.
+   CDP CLI creates its own request-bound JWTs; no API key, private key, JWT, or
+   capability secret appears in policy JSON or in the Agent process.
 3. Mint a session with a cap at or below `$0.10`, then mint a capability that
    permits exactly that resource and scheme.
 4. Use the separate CDP non-custodial UI or another external x402 signer to sign

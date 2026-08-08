@@ -300,7 +300,7 @@ def validate_policy(policy: dict) -> list[str]:
         "asset_name", "asset_version", "x402_version",
         "pay_to", "network", "scheme", "max_timeout_seconds", "description",
         "mime_type", "budget", "merchant", "service", "facilitator_url",
-        "facilitator_auth_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
+        "facilitator_auth_env", "facilitator_mode", "facilitator_cdp_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
         "payment_policy",
     }
 
@@ -395,6 +395,8 @@ def validate_policy(policy: dict) -> list[str]:
         for required in ("url", "amount", "pay_to", "asset", "facilitator_url"):
             if required not in resource:
                 errors.append(f"x402 resource {name} missing {required}")
+        if resource.get("facilitator_mode", "http") not in {"http", "cdp-cli"}:
+            errors.append(f"x402 resource {name} has unsupported facilitator_mode")
         payment_policy = resource.get("payment_policy")
         if payment_policy is not None:
             if not isinstance(payment_policy, dict):

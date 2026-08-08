@@ -38,7 +38,7 @@ from .providers import llm_provider
 from .report import render
 from .scenarios import ScenarioError, render_report, run_scenarios
 from .store import SpendStore
-from .facilitator import FacilitatorError, require_supported
+from .facilitator import FacilitatorError, cdp_cli_x402, require_supported
 from .bazaar import approved_gateway_resources, fetch_resources, filter_resources
 from .x402_sandbox import x402_sandbox
 from .capabilities import CapabilityError, mint_capability, verify_capability
@@ -330,6 +330,10 @@ def _x402_settlement_units(settle_result: dict, authorization_limit_units: str, 
 
 
 def _facilitator_request_json(url: str, payload: dict, resource: dict) -> dict:
+    if resource.get("facilitator_mode") == "cdp-cli":
+        action = urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+        return cdp_cli_x402(action, payload, environment=str(resource.get("facilitator_cdp_env", "")),
+                            timeout=float(resource.get("timeout", 30)))
     headers = {"content-type": "application/json"}
     auth_env = resource.get("facilitator_auth_env")
     if auth_env and os.environ.get(str(auth_env)):
@@ -1502,6 +1506,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         version=int(resource.get("x402_version", 2)),
                         scheme=str(requirements["scheme"]), network=str(requirements["network"]),
                         auth_env=resource.get("facilitator_auth_env"),
+                        mode=str(resource.get("facilitator_mode", "http")),
+                        cdp_environment=str(resource.get("facilitator_cdp_env", "")),
                         timeout=float(resource.get("timeout", 30)),
                     )
                 except (FacilitatorError, OSError, ValueError) as exc:
