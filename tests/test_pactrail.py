@@ -75,6 +75,12 @@ class PactrailTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 post("/payment-intents", {"resource_id": "not-approved"}, f"Capability {minted['capability']}")
             self.assertEqual(error.exception.code, 404)
+            status, revoked = post(f"/sessions/{session['session_id']}/revoke", {}, "Bearer admin-token")
+            self.assertEqual(status, 200)
+            self.assertTrue(revoked["revoked"])
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                post("/payment-intents", {"resource_id": "research"}, f"Capability {minted['capability']}")
+            self.assertEqual(error.exception.code, 401)
 
     def test_sdk_runs_quote_sign_retry_and_receipt_with_external_signer_mock(self) -> None:
         old_secret = os.environ.get("PACTRAIL_CAPABILITY_SECRET")
