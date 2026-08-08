@@ -41,12 +41,18 @@ class PactrailClient:
         _, raw = self._request("/payment-intents", body={"resource_id": resource_id})
         return PaymentIntent.from_dict(json.loads(raw))
 
-    def pay_x402(self, intent: PaymentIntent, payload: bytes, signer: Callable[[dict[str, Any]], str]) -> tuple[dict, dict]:
+    def pay_x402(self, intent: PaymentIntent, payload: bytes, signer: Callable[[dict[str, Any]], str],
+                 *, protocol_headers: dict[str, str] | None = None) -> tuple[dict, dict]:
         """Perform quote -> external signature -> retry. The SDK never sees a private key."""
+        protocol_headers = {str(key).lower(): str(value) for key, value in (protocol_headers or {}).items()}
+        protected = {"authorization", "content-type", "payment-signature", "x-agent-id", "x-budget-id", "x-session-id", "x-request-id"}
+        conflict = protected.intersection(protocol_headers)
+        if conflict:
+            raise PactrailError(f"protocol headers cannot override Pactrail bindings: {', '.join(sorted(conflict))}")
         path = f"/x402/{intent.resource_id}"
         headers = {"content-type": "application/json", "x-agent-id": self.agent_id,
                    "x-budget-id": self.budget_id, "x-session-id": self.session_id,
-                   "x-request-id": intent.request_id}
+                   "x-request-id": intent.request_id, **protocol_headers}
         req = urllib.request.Request(self.gateway_url.rstrip("/") + path, data=payload,
                                      headers={"authorization": f"Capability {self.capability}", **headers}, method="POST")
         try:
