@@ -19,7 +19,11 @@ def facilitator_headers(auth_env: str | None = None) -> dict[str, str]:
 
 def _cdp_cli(action: str, payload: dict | None = None, *, environment: str = "", timeout: float = 30) -> dict:
     """Use the operator's configured CDP CLI without exposing its API key to Pactrail."""
-    command = ["cdp"]
+    # Windows service/background processes do not always inherit the npm global
+    # bin directory. Operators may provide the absolute cdp.cmd path locally;
+    # no credential is read from this setting.
+    executable = os.environ.get("PACTRAIL_CDP_CLI_PATH", "").strip() or "cdp"
+    command = [executable]
     if environment:
         command.extend(["--env", environment])
     command.extend(["x402", action])

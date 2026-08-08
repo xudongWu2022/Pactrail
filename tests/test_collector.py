@@ -184,6 +184,19 @@ class CollectorTest(unittest.TestCase):
             self.assertIn('paymentPayload:={"a":1}', command)
             self.assertIn('paymentRequirements:={"b":2}', command)
 
+    def test_cdp_cli_facilitator_accepts_a_local_absolute_executable_path(self) -> None:
+        supported = {"kinds": [{"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}]}
+        with patch.dict("os.environ", {"PACTRAIL_CDP_CLI_PATH": r"C:\\tools\\cdp.cmd"}):
+            with patch("spend_collector.facilitator.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = json.dumps(supported)
+                self.assertEqual(
+                    require_supported("https://api.cdp.coinbase.com/platform/v2/x402", version=2,
+                                      scheme="exact", network="eip155:84532", mode="cdp-cli"),
+                    supported,
+                )
+                self.assertEqual(run.call_args.args[0][0], r"C:\\tools\\cdp.cmd")
+
     def test_store_migrates_legacy_x402_payment_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy-x402.db"

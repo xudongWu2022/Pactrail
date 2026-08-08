@@ -16,6 +16,9 @@ unbounded wallet for this demo.
    Pactrail then invokes `cdp x402 supported`, `verify`, and `settle` locally.
    CDP CLI creates its own request-bound JWTs; no API key, private key, JWT, or
    capability secret appears in policy JSON or in the Agent process.
+   On Windows background processes, set `PACTRAIL_CDP_CLI_PATH` in the gateway
+   environment to the absolute `cdp.cmd` path if the npm global bin directory
+   is not inherited. This is an executable path, not a credential.
 3. Mint a session with a cap at or below `$0.10`, then mint a capability that
    permits exactly that resource and scheme.
 4. Use the separate CDP non-custodial UI or another external x402 signer to sign
