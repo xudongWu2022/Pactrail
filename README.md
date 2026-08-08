@@ -63,6 +63,44 @@ it does **not** validate cryptographic signatures or transfer USDC. Use it to
 verify the order `quote -> sign -> verify -> settle -> deliver` before attaching
 a real facilitator and signer.
 
+## Scheme-aware x402 policy
+
+Every x402 resource now has an explicit `payment_policy`. `exact` is a fixed
+price. `upto` holds the wallet's maximum authorization, then records only the
+facilitator's `extra.chargedAmount` as actual usage and final settlement. The
+unused authorization is released. `batch-settlement` applies the same per-call
+authorization accounting and also atomically enforces a batch cap; callers must
+send `X-Pactrail-Batch-ID`, and an authorized operator closes Pactrail's audit
+batch with `POST /x402/batches/<batch-id>/close`. The actual on-chain batching
+and settlement remain the responsibility of the configured facilitator, which
+must advertise support for `batch-settlement` during preflight.
+
+```json
+{
+  "payment_policy": {
+    "scheme": "upto",
+    "authorization_limit_units": "100000"
+  }
+}
+```
+
+```json
+{
+  "payment_policy": {
+    "scheme": "batch-settlement",
+    "authorization_limit_units": "10000",
+    "batch_limit_units": "100000",
+    "batch_id_header": "x-pactrail-batch-id"
+  }
+}
+```
+
+The safe read endpoints are `GET /x402/payments/<request-id>` and
+`GET /x402/batches/<batch-id>`. Both omit signed payment payloads. The local
+sandbox accepts `paymentPayload.payload.actual_usage_units` to simulate a lower
+usage charge for tests; this field is never a replacement for a real
+facilitator's verified settlement result.
+
 Preflight a facilitator before enabling it for an x402 resource:
 
 ```bash

@@ -30,6 +30,7 @@ class SpendStore:
         self.db.execute(_GATEWAY_DECISIONS_DDL)
         self.db.execute(_SPEND_RESERVATIONS_DDL)
         self.db.execute(_X402_PAYMENTS_DDL)
+        self.db.execute(_X402_BATCHES_DDL)
         self._migrate_columns()
 
     def _migrate_columns(self) -> None:
@@ -39,6 +40,15 @@ class SpendStore:
                 kind = "REAL" if column in _NUMERIC else "TEXT"
                 default = "0" if column in _NUMERIC else "''"
                 self.db.execute(f"ALTER TABLE spend_events ADD COLUMN {column} {kind} DEFAULT {default}")
+        x402_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(x402_payments)")}
+        for column in (
+            "scheme TEXT DEFAULT 'exact'", "authorization_limit_units TEXT DEFAULT ''",
+            "usage_units TEXT DEFAULT ''", "settled_units TEXT DEFAULT ''",
+            "released_units TEXT DEFAULT ''", "batch_id TEXT DEFAULT ''",
+        ):
+            name = column.split()[0]
+            if name not in x402_columns:
+                self.db.execute(f"ALTER TABLE x402_payments ADD COLUMN {column}")
         self.db.commit()
 
     def close(self) -> None:
@@ -159,7 +169,9 @@ class SpendStore:
         )
         self.db.commit()
 
-    def claim_x402_payment(self, request_id: str, resource_id: str, payment_fingerprint: str) -> str | None:
+    def claim_x402_payment(self, request_id: str, resource_id: str, payment_fingerprint: str, *,
+                           scheme: str = "exact", authorization_limit_units: str = "",
+                           batch_id: str = "") -> str | None:
         """Claim a signed x402 payload before verification/settlement.
 
         Returns the earlier request id when this exact signed payload was already
@@ -177,9 +189,10 @@ class SpendStore:
                 self.db.commit()
                 return str(row["request_id"])
             self.db.execute(
-                "INSERT INTO x402_payments (request_id, resource_id, payment_fingerprint, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'approved', ?, ?)",
-                (request_id, resource_id, payment_fingerprint, now, now),
+                "INSERT INTO x402_payments (request_id, resource_id, payment_fingerprint, scheme, "
+                "authorization_limit_units, batch_id, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?)",
+                (request_id, resource_id, payment_fingerprint, scheme, authorization_limit_units, batch_id, now, now),
             )
             self.db.commit()
             return None
@@ -195,6 +208,94 @@ class SpendStore:
             (status, transaction_ref, transaction_ref, detail, _now(), request_id),
         )
         self.db.commit()
+
+    def account_x402_payment(self, request_id: str, *, usage_units: str, settled_units: str) -> None:
+        """Persist the final money facts without treating an authorization as spend."""
+        row = self.x402_payment(request_id)
+        if not row:
+            raise ValueError(f"unknown x402 payment {request_id}")
+        limit = int(row["authorization_limit_units"] or 0)
+        usage = int(usage_units)
+        settled = int(settled_units)
+        if usage < 0 or settled < 0 or usage != settled:
+            raise ValueError("x402 usage and settled amounts must be equal non-negative atomic units")
+        if limit and settled > limit:
+            raise ValueError(f"x402 settlement {settled} exceeds authorization limit {limit}")
+        self.db.execute(
+            "UPDATE x402_payments SET usage_units = ?, settled_units = ?, released_units = ?, updated_at = ? "
+            "WHERE request_id = ?",
+            (str(usage), str(settled), str(max(limit - settled, 0)), _now(), request_id),
+        )
+        self.db.commit()
+
+    def reserve_x402_batch(self, *, batch_id: str, resource_id: str, authorization_limit_units: str,
+                            batch_limit_units: str) -> None:
+        """Atomically hold a batch slice so concurrent agent calls cannot exceed its cap."""
+        authorization = int(authorization_limit_units)
+        limit = int(batch_limit_units)
+        if not batch_id or authorization <= 0 or limit <= 0:
+            raise ValueError("batch id, authorization limit, and batch limit must be positive")
+        now = _now()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT * FROM x402_batches WHERE batch_id = ?", (batch_id,)).fetchone()
+            if row is None:
+                self.db.execute(
+                    "INSERT INTO x402_batches (batch_id, resource_id, status, authorization_limit_units, "
+                    "reserved_units, usage_units, settled_units, created_at, updated_at) "
+                    "VALUES (?, ?, 'open', ?, ?, '0', '0', ?, ?)",
+                    (batch_id, resource_id, str(limit), str(authorization), now, now),
+                )
+            else:
+                if row["resource_id"] != resource_id or row["status"] != "open":
+                    raise ValueError("x402 batch is not open for this resource")
+                if int(row["authorization_limit_units"]) != limit:
+                    raise ValueError("x402 batch limit does not match the existing batch")
+                if int(row["reserved_units"]) + authorization > limit:
+                    raise ValueError("x402 batch authorization would exceed its cap")
+                self.db.execute(
+                    "UPDATE x402_batches SET reserved_units = ?, updated_at = ? WHERE batch_id = ?",
+                    (str(int(row["reserved_units"]) + authorization), now, batch_id),
+                )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def account_x402_batch(self, *, batch_id: str, authorization_limit_units: str,
+                           usage_units: str, settled_units: str) -> None:
+        """Replace a batch hold with actual usage, preserving the unused balance."""
+        authorization, usage, settled = map(int, (authorization_limit_units, usage_units, settled_units))
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT * FROM x402_batches WHERE batch_id = ?", (batch_id,)).fetchone()
+            if row is None or row["status"] != "open":
+                raise ValueError("x402 batch is not open")
+            if usage != settled or settled < 0 or settled > authorization:
+                raise ValueError("invalid x402 batch settlement amount")
+            reserved = int(row["reserved_units"]) - authorization
+            if reserved < 0:
+                raise ValueError("x402 batch reservation is inconsistent")
+            self.db.execute(
+                "UPDATE x402_batches SET reserved_units = ?, usage_units = ?, settled_units = ?, updated_at = ? "
+                "WHERE batch_id = ?",
+                (str(reserved), str(int(row["usage_units"]) + usage),
+                 str(int(row["settled_units"]) + settled), _now(), batch_id),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def close_x402_batch(self, batch_id: str) -> None:
+        self.db.execute(
+            "UPDATE x402_batches SET status = 'closed', updated_at = ? WHERE batch_id = ? AND status = 'open'",
+            (_now(), batch_id),
+        )
+        self.db.commit()
+
+    def x402_batch(self, batch_id: str):
+        return self.db.execute("SELECT * FROM x402_batches WHERE batch_id = ?", (batch_id,)).fetchone()
 
     def x402_payment(self, request_id: str):
         return self.db.execute("SELECT * FROM x402_payments WHERE request_id = ?", (request_id,)).fetchone()
@@ -325,5 +426,13 @@ _SPEND_RESERVATIONS_DDL = (
 _X402_PAYMENTS_DDL = (
     "CREATE TABLE IF NOT EXISTS x402_payments ("
     "request_id TEXT PRIMARY KEY, resource_id TEXT, payment_fingerprint TEXT UNIQUE, "
+    "scheme TEXT DEFAULT 'exact', authorization_limit_units TEXT DEFAULT '', usage_units TEXT DEFAULT '', "
+    "settled_units TEXT DEFAULT '', released_units TEXT DEFAULT '', batch_id TEXT DEFAULT '', "
     "status TEXT, transaction_ref TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TEXT, updated_at TEXT)"
+)
+
+_X402_BATCHES_DDL = (
+    "CREATE TABLE IF NOT EXISTS x402_batches ("
+    "batch_id TEXT PRIMARY KEY, resource_id TEXT, status TEXT, authorization_limit_units TEXT, "
+    "reserved_units TEXT, usage_units TEXT, settled_units TEXT, created_at TEXT, updated_at TEXT)"
 )

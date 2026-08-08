@@ -29,6 +29,9 @@
       "pay_to": "0x000000000000000000000000000000000000dEaD",
       "network": "eip155:84532",
       "scheme": "exact",
+      "payment_policy": {
+        "scheme": "exact"
+      },
       "x402_version": 2,
       "facilitator_url": "http://127.0.0.1:8788",
       "preflight_supported": true,

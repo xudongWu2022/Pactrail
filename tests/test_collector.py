@@ -18,7 +18,7 @@ from pathlib import Path
 from spend_collector.__main__ import (
     _alert_payload, _alert_platform, _alert_row, _format_alert, _is_event_stream,
     _load_budgets, _run_summary, _triage_alerts, _usage_body_from_sse, _with_stream_usage,
-    main, make_gateway_server,
+    _x402_settlement_units, main, make_gateway_server,
 )
 from spend_collector.adapters import (
     _price, _tokencost_price, from_llm_usage, from_stripe_events,
@@ -108,8 +108,84 @@ class CollectorTest(unittest.TestCase):
                 results.append(json.load(resp))
         self.assertTrue(results[0]["success"])
         self.assertEqual(results[0]["transaction"], results[1]["transaction"])
+        upto = {
+            "paymentPayload": {"payload": {"actual_usage_units": "18000"}},
+            "paymentRequirements": {"scheme": "upto", "amount": "100000", "network": "eip155:84532"},
+        }
+        req = urllib.request.Request(base + "/settle", data=json.dumps(upto).encode(),
+                                     headers={"content-type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            self.assertEqual(json.load(resp)["extra"]["chargedAmount"], "18000")
         capabilities = require_supported(base, version=2, scheme="exact", network="eip155:84532")
-        self.assertEqual(capabilities["kinds"][0]["scheme"], "exact")
+        self.assertEqual([kind["scheme"] for kind in capabilities["kinds"]], ["exact", "upto", "batch-settlement"])
+
+    def test_x402_scheme_accounting_separates_authorization_usage_and_settlement(self) -> None:
+        with SpendStore(":memory:") as store:
+            self.assertIsNone(store.claim_x402_payment(
+                "upto-1", "metered", "fingerprint-upto", scheme="upto",
+                authorization_limit_units="100000",
+            ))
+            store.account_x402_payment("upto-1", usage_units="18000", settled_units="18000")
+            upto = store.x402_payment("upto-1")
+            self.assertEqual(upto["authorization_limit_units"], "100000")
+            self.assertEqual(upto["usage_units"], "18000")
+            self.assertEqual(upto["settled_units"], "18000")
+            self.assertEqual(upto["released_units"], "82000")
+
+            store.reserve_x402_batch(
+                batch_id="batch-1", resource_id="metered", authorization_limit_units="40000",
+                batch_limit_units="50000",
+            )
+            with self.assertRaisesRegex(ValueError, "exceed its cap"):
+                store.reserve_x402_batch(
+                    batch_id="batch-1", resource_id="metered", authorization_limit_units="20000",
+                    batch_limit_units="50000",
+                )
+            store.account_x402_batch(
+                batch_id="batch-1", authorization_limit_units="40000", usage_units="12000", settled_units="12000",
+            )
+            store.close_x402_batch("batch-1")
+            batch = store.x402_batch("batch-1")
+            self.assertEqual(batch["status"], "closed")
+            self.assertEqual(batch["reserved_units"], "0")
+            self.assertEqual(batch["usage_units"], "12000")
+
+        self.assertEqual(_x402_settlement_units({"extra": {"chargedAmount": "18000"}}, "100000", "upto"), "18000")
+        with self.assertRaisesRegex(ValueError, "must equal"):
+            _x402_settlement_units({"amount": "18000"}, "100000", "exact")
+
+    def test_store_migrates_legacy_x402_payment_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-x402.db"
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE x402_payments (request_id TEXT PRIMARY KEY, resource_id TEXT, "
+                "payment_fingerprint TEXT UNIQUE, status TEXT, transaction_ref TEXT DEFAULT '', "
+                "detail TEXT DEFAULT '', created_at TEXT, updated_at TEXT)"
+            )
+            db.commit()
+            db.close()
+            with SpendStore(str(path)) as store:
+                columns = {row["name"] for row in store.db.execute("PRAGMA table_info(x402_payments)")}
+            self.assertTrue({"scheme", "authorization_limit_units", "usage_units", "settled_units",
+                             "released_units", "batch_id"} <= columns)
+
+    def test_x402_scheme_policy_validation_is_fail_closed(self) -> None:
+        base = {
+            "x402_resources": {
+                "metered": {
+                    "url": "https://merchant.example/usage", "amount": 1.0, "asset": "0xUSDC",
+                    "pay_to": "0xmerchant", "facilitator_url": "https://facilitator.example",
+                    "payment_policy": {"scheme": "upto"},
+                },
+            },
+        }
+        self.assertIn("upto payment_policy missing authorization_limit_units", " ".join(validate_policy(base)))
+        base["x402_resources"]["metered"]["payment_policy"] = {
+            "scheme": "batch-settlement", "authorization_limit_units": "100", "batch_limit_units": "500",
+            "batch_id_header": "wrong-header",
+        }
+        self.assertIn("batch_id_header must be x-pactrail-batch-id", " ".join(validate_policy(base)))
 
     def test_bazaar_filter_requires_all_configured_payment_dimensions(self) -> None:
         results = filter_resources({"items": [

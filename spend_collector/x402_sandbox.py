@@ -42,7 +42,11 @@ def make_x402_sandbox(host: str = "127.0.0.1", port: int = 8788) -> ThreadingHTT
             if self.path == "/health":
                 self._json(200, {"ok": True, "mode": "local-x402-sandbox"})
             elif self.path == "/supported":
-                self._json(200, {"kinds": [{"x402Version": 2, "scheme": "exact", "network": "eip155:84532"}]})
+                self._json(200, {"kinds": [
+                    {"x402Version": 2, "scheme": "exact", "network": "eip155:84532"},
+                    {"x402Version": 2, "scheme": "upto", "network": "eip155:84532"},
+                    {"x402Version": 2, "scheme": "batch-settlement", "network": "eip155:84532"},
+                ]})
             elif self.path.startswith("/paid/"):
                 self._json(200, {"ok": True, "sandbox": True, "resource": self.path})
             else:
@@ -67,11 +71,22 @@ def make_x402_sandbox(host: str = "127.0.0.1", port: int = 8788) -> ThreadingHTT
                 fingerprint = hashlib.sha256(
                     json.dumps(payment, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
+                requirements = body.get("paymentRequirements") or {}
+                scheme = str(requirements.get("scheme", "exact"))
+                authorized = int(str(requirements.get("amount", "0")))
+                charged = authorized
+                if scheme in {"upto", "batch-settlement"}:
+                    charged = int(str(flags.get("actual_usage_units", authorized)))
+                    if charged < 0 or charged > authorized:
+                        self._json(200, {"success": False, "errorReason": "sandbox_usage_exceeds_authorization",
+                                         "errorMessage": "actual usage must be within the authorization limit"})
+                        return
                 result = settlements.setdefault(fingerprint, {
                     "success": True, "payer": "sandbox-payer",
                     "transaction": "sandbox:" + fingerprint[:24],
-                    "network": "eip155:8453",
-                    "amount": str((body.get("paymentRequirements") or {}).get("amount", "0")),
+                    "network": str(requirements.get("network", "eip155:84532")),
+                    "amount": str(authorized),
+                    "extra": {"chargedAmount": str(charged)},
                 })
                 self._json(200, result)
                 return

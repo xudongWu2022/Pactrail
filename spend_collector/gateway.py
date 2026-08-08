@@ -300,6 +300,7 @@ def validate_policy(policy: dict) -> list[str]:
         "pay_to", "network", "scheme", "max_timeout_seconds", "description",
         "mime_type", "budget", "merchant", "service", "facilitator_url",
         "facilitator_auth_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
+        "payment_policy",
     }
 
     if not isinstance(policy, dict):
@@ -393,6 +394,39 @@ def validate_policy(policy: dict) -> list[str]:
         for required in ("url", "amount", "pay_to", "asset", "facilitator_url"):
             if required not in resource:
                 errors.append(f"x402 resource {name} missing {required}")
+        payment_policy = resource.get("payment_policy")
+        if payment_policy is not None:
+            if not isinstance(payment_policy, dict):
+                errors.append(f"x402 resource {name} payment_policy must be an object")
+            else:
+                scheme = payment_policy.get("scheme", resource.get("scheme", "exact"))
+                allowed = {"exact", "upto", "batch-settlement"}
+                if scheme not in allowed:
+                    errors.append(f"x402 resource {name} has unsupported payment scheme {scheme}")
+                if resource.get("scheme") and resource["scheme"] != scheme:
+                    errors.append(f"x402 resource {name} scheme must match payment_policy.scheme")
+                allowed_keys = {
+                    "exact": {"scheme"},
+                    "upto": {"scheme", "authorization_limit_units"},
+                    "batch-settlement": {"scheme", "authorization_limit_units", "batch_limit_units", "batch_id_header"},
+                }
+                for key in payment_policy:
+                    if key not in allowed_keys.get(scheme, set()):
+                        errors.append(f"unknown {scheme} payment_policy key for {name}: {key}")
+                for required_key in ({"upto": {"authorization_limit_units"},
+                                     "batch-settlement": {"authorization_limit_units", "batch_limit_units", "batch_id_header"}}
+                                     .get(scheme, set())):
+                    if required_key not in payment_policy:
+                        errors.append(f"x402 resource {name} {scheme} payment_policy missing {required_key}")
+                for amount_key in ("authorization_limit_units", "batch_limit_units"):
+                    if amount_key in payment_policy:
+                        try:
+                            if int(str(payment_policy[amount_key])) <= 0:
+                                errors.append(f"x402 resource {name} {amount_key} must be positive")
+                        except (TypeError, ValueError):
+                            errors.append(f"x402 resource {name} {amount_key} must be an integer")
+                if scheme == "batch-settlement" and payment_policy.get("batch_id_header") != "x-pactrail-batch-id":
+                    errors.append(f"x402 resource {name} batch_id_header must be x-pactrail-batch-id")
         for key, value in resource.get("headers", {}).items():
             if "authorization" in key.lower() or str(value).startswith(("sk-", "rk_")):
                 errors.append(f"x402 resource {name} header {key} looks like a raw secret; use headers_env")
@@ -579,9 +613,11 @@ def record_x402_settlement(
     settle_result: dict,
 ):
     """Record an x402 middleware settlement without storing the signed payment payload."""
+    # `upto` reports the actual post-usage amount in chargedAmount. Prefer it
+    # over the quote/authorization value returned in a generic amount field.
     amount_units = float(
-        settle_result.get("amount")
-        or (settle_result.get("extra") or {}).get("chargedAmount")
+        (settle_result.get("extra") or {}).get("chargedAmount")
+        or settle_result.get("amount")
         or requirements.get("amount")
         or 0
     )
@@ -619,6 +655,7 @@ def record_x402_settlement(
             "payer": payer,
             "network": network,
             "amount": requirements.get("amount"),
+            "settled_amount": str(amount_units),
             "payTo": requirements.get("payTo"),
             "resource": service,
             "request_id": request_id,

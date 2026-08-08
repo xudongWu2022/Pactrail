@@ -247,12 +247,25 @@ def _x402_amount_units(resource: dict) -> str:
     return str(int(round(float(resource["amount"]) * (10 ** decimals))))
 
 
+def _x402_scheme(resource: dict) -> str:
+    policy = resource.get("payment_policy") or {}
+    return str(policy.get("scheme", resource.get("scheme", "exact")))
+
+
+def _x402_authorization_units(resource: dict) -> str:
+    """Amount the wallet may authorize. It is deliberately not always spend."""
+    policy = resource.get("payment_policy") or {}
+    if _x402_scheme(resource) in {"upto", "batch-settlement"}:
+        return str(policy["authorization_limit_units"])
+    return _x402_amount_units(resource)
+
+
 def _x402_payment_requirements(resource: dict) -> dict:
     return {
-        "scheme": str(resource.get("scheme", "exact")),
+        "scheme": _x402_scheme(resource),
         "network": str(resource.get("network", "eip155:8453")),
         "asset": str(resource["asset"]),
-        "amount": _x402_amount_units(resource),
+        "amount": _x402_authorization_units(resource),
         "payTo": str(resource["pay_to"]),
         "maxTimeoutSeconds": int(resource.get("max_timeout_seconds", 60)),
         "extra": {
@@ -295,6 +308,22 @@ def _x402_payment_binding_errors(payment_payload: dict, requirements: dict, reso
     else:
         errors.append("payment payload missing resource binding")
     return errors
+
+
+def _x402_settlement_units(settle_result: dict, authorization_limit_units: str, scheme: str) -> str:
+    """Read the actual charge reported by the facilitator and enforce scheme semantics."""
+    extra = settle_result.get("extra") or {}
+    raw = extra.get("chargedAmount", settle_result.get("amount", authorization_limit_units))
+    try:
+        settled = int(str(raw))
+        authorized = int(str(authorization_limit_units))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("facilitator returned a non-integer atomic settlement amount") from exc
+    if settled < 0 or settled > authorized:
+        raise ValueError("facilitator settlement exceeds the x402 authorization limit")
+    if scheme == "exact" and settled != authorized:
+        raise ValueError("exact x402 settlement must equal the authorized amount")
+    return str(settled)
 
 
 def _facilitator_request_json(url: str, payload: dict, resource: dict) -> dict:
@@ -1308,7 +1337,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             return {
                 "agent": agent,
                 "rail": "api_x402",
-                "amount": float(resource["amount"]),
+                "amount": float(_x402_authorization_units(resource)) / (10 ** int(resource.get("asset_decimals", 6))),
                 "budget": self.headers.get("x-budget-id") or resource.get("budget", "default"),
                 "provider": "x402",
                 "service": resource.get("service", resource_id),
@@ -1454,8 +1483,22 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             payment_fingerprint = hashlib.sha256(
                 json.dumps(payment_payload, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
+            scheme = str(requirements["scheme"])
+            authorization_limit_units = str(requirements["amount"])
+            payment_policy = resource.get("payment_policy") or {}
+            batch_id = ""
+            if scheme == "batch-settlement":
+                batch_id = str(self.headers.get(str(payment_policy.get("batch_id_header", "")), "")).strip()
+                if not batch_id:
+                    with SpendStore(str(db_path)) as store:
+                        store.release_reservation(request_id)
+                    self._send(400, {"error": "missing_x402_batch_id", "request_id": request_id})
+                    return True
             with SpendStore(str(db_path)) as store:
-                previous_request = store.claim_x402_payment(request_id, resource_id, payment_fingerprint)
+                previous_request = store.claim_x402_payment(
+                    request_id, resource_id, payment_fingerprint, scheme=scheme,
+                    authorization_limit_units=authorization_limit_units, batch_id=batch_id,
+                )
                 if previous_request:
                     store.release_reservation(request_id)
                     self._send(409, {
@@ -1465,6 +1508,23 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         "detail": "This payment signature was already submitted; sign a fresh payment.",
                     })
                     return True
+                if batch_id:
+                    try:
+                        store.reserve_x402_batch(
+                            batch_id=batch_id,
+                            resource_id=resource_id,
+                            authorization_limit_units=authorization_limit_units,
+                            batch_limit_units=str(payment_policy["batch_limit_units"]),
+                        )
+                    except ValueError as exc:
+                        store.release_reservation(request_id)
+                        store.account_x402_payment(
+                            request_id, usage_units="0", settled_units="0",
+                        )
+                        store.update_x402_payment(request_id, "batch_denied", detail=str(exc))
+                        self._send(403, {"error": "x402_batch_limit_exceeded", "request_id": request_id,
+                                         "detail": str(exc)})
+                        return True
             facilitator = str(resource.get("facilitator_url", ""))
             if not facilitator:
                 raise ValueError("x402 resource missing facilitator_url")
@@ -1482,6 +1542,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if not verify_result.get("isValid"):
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
+                    store.account_x402_payment(request_id, usage_units="0", settled_units="0")
+                    if batch_id:
+                        store.account_x402_batch(batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                                                 usage_units="0", settled_units="0")
                     store.update_x402_payment(request_id, "verification_failed",
                                               detail=str(verify_result.get("invalidReason", "invalid_payment")))
                 self._send_x402_required(resource_id, resource, requirements, error={
@@ -1501,6 +1565,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if settle_result.get("success") is False:
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
+                    store.account_x402_payment(request_id, usage_units="0", settled_units="0")
+                    if batch_id:
+                        store.account_x402_batch(batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                                                 usage_units="0", settled_units="0")
                     store.update_x402_payment(request_id, "settlement_failed",
                                               detail=str(settle_result.get("errorReason", "settlement_failed")))
                 self._send_x402_required(resource_id, resource, requirements, error={
@@ -1509,19 +1577,40 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 })
                 return True
 
-            with SpendStore(str(db_path)) as store:
-                record_x402_settlement(
-                    store,
-                    guard_payload,
-                    request_id,
-                    requirements,
-                    verify_result,
-                    settle_result,
-                )
-                store.update_x402_payment(
-                    request_id, "settled",
-                    transaction_ref=str(settle_result.get("transaction") or settle_result.get("txHash") or ""),
-                )
+            try:
+                settled_units = _x402_settlement_units(settle_result, authorization_limit_units, scheme)
+                with SpendStore(str(db_path)) as store:
+                    store.account_x402_payment(
+                        request_id, usage_units=settled_units, settled_units=settled_units,
+                    )
+                    if batch_id:
+                        store.account_x402_batch(
+                            batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                            usage_units=settled_units, settled_units=settled_units,
+                        )
+                    record_x402_settlement(
+                        store,
+                        guard_payload,
+                        request_id,
+                        requirements,
+                        verify_result,
+                        settle_result,
+                    )
+                    store.update_x402_payment(
+                        request_id, "settled",
+                        transaction_ref=str(settle_result.get("transaction") or settle_result.get("txHash") or ""),
+                    )
+            except ValueError as exc:
+                with SpendStore(str(db_path)) as store:
+                    store.release_reservation(request_id)
+                    store.account_x402_payment(request_id, usage_units="0", settled_units="0")
+                    if batch_id:
+                        store.account_x402_batch(batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                                                 usage_units="0", settled_units="0")
+                    store.update_x402_payment(request_id, "accounting_failed", detail=str(exc))
+                self._send(502, {"error": "invalid_x402_settlement", "request_id": request_id,
+                                 "detail": str(exc)})
+                return True
             self._raw_body = body
             try:
                 self._forward_x402_resource(resource, settle_result, request_id)
@@ -1686,6 +1775,19 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 else:
                     self._send(200, {key: payment[key] for key in payment.keys() if key != "payment_fingerprint"})
                 return
+            if parsed.path.startswith("/x402/batches/"):
+                policy = _load_policy(policy_path)
+                if not self._authorized(policy):
+                    self._send(401, {"error": "unauthorized"})
+                    return
+                batch_id = parsed.path.rsplit("/", 1)[-1]
+                with SpendStore(str(db_path)) as store:
+                    batch = store.x402_batch(batch_id)
+                if batch is None:
+                    self._send(404, {"error": "x402_batch_not_found", "batch_id": batch_id})
+                else:
+                    self._send(200, {key: batch[key] for key in batch.keys()})
+                return
             policy = _load_policy(policy_path)
             if self._handle_x402(policy):
                 return
@@ -1705,6 +1807,23 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     with SpendStore(str(db_path)) as store:
                         released = store.release_reservation(request_id)
                     self._send(200, {"request_id": request_id, "released": released})
+                    return
+                if self.path.startswith("/x402/batches/") and self.path.endswith("/close"):
+                    batch_id = self.path.removeprefix("/x402/batches/").removesuffix("/close").strip("/")
+                    if not batch_id:
+                        self._send(400, {"error": "missing_x402_batch_id"})
+                        return
+                    with SpendStore(str(db_path)) as store:
+                        batch = store.x402_batch(batch_id)
+                        if batch is None:
+                            self._send(404, {"error": "x402_batch_not_found", "batch_id": batch_id})
+                            return
+                        if int(batch["reserved_units"]) != 0:
+                            self._send(409, {"error": "x402_batch_has_active_authorizations", "batch_id": batch_id})
+                            return
+                        store.close_x402_batch(batch_id)
+                        closed = store.x402_batch(batch_id)
+                    self._send(200, {key: closed[key] for key in closed.keys()})
                     return
                 if self.path == "/guard":
                     decision = self._guard_payload(payload)
