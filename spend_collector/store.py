@@ -51,6 +51,9 @@ class SpendStore:
             name = column.split()[0]
             if name not in x402_columns:
                 self.db.execute(f"ALTER TABLE x402_payments ADD COLUMN {column}")
+        batch_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(x402_batches)")}
+        if "session_id" not in batch_columns:
+            self.db.execute("ALTER TABLE x402_batches ADD COLUMN session_id TEXT DEFAULT ''")
         decision_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(gateway_decisions)")}
         if "x_session_id" not in decision_columns:
             self.db.execute("ALTER TABLE gateway_decisions ADD COLUMN x_session_id TEXT DEFAULT ''")
@@ -235,7 +238,7 @@ class SpendStore:
         self.db.commit()
 
     def reserve_x402_batch(self, *, batch_id: str, resource_id: str, authorization_limit_units: str,
-                            batch_limit_units: str) -> None:
+                            batch_limit_units: str, session_id: str = "") -> None:
         """Atomically hold a batch slice so concurrent agent calls cannot exceed its cap."""
         authorization = int(authorization_limit_units)
         limit = int(batch_limit_units)
@@ -247,14 +250,16 @@ class SpendStore:
             row = self.db.execute("SELECT * FROM x402_batches WHERE batch_id = ?", (batch_id,)).fetchone()
             if row is None:
                 self.db.execute(
-                    "INSERT INTO x402_batches (batch_id, resource_id, status, authorization_limit_units, "
+                    "INSERT INTO x402_batches (batch_id, resource_id, session_id, status, authorization_limit_units, "
                     "reserved_units, usage_units, settled_units, created_at, updated_at) "
-                    "VALUES (?, ?, 'open', ?, ?, '0', '0', ?, ?)",
-                    (batch_id, resource_id, str(limit), str(authorization), now, now),
+                    "VALUES (?, ?, ?, 'open', ?, ?, '0', '0', ?, ?)",
+                    (batch_id, resource_id, session_id, str(limit), str(authorization), now, now),
                 )
             else:
                 if row["resource_id"] != resource_id or row["status"] != "open":
                     raise ValueError("x402 batch is not open for this resource")
+                if session_id and row["session_id"] != session_id:
+                    raise ValueError("x402 batch belongs to a different spend session")
                 if int(row["authorization_limit_units"]) != limit:
                     raise ValueError("x402 batch limit does not match the existing batch")
                 if int(row["reserved_units"]) + authorization > limit:
@@ -509,7 +514,7 @@ _X402_PAYMENTS_DDL = (
 
 _X402_BATCHES_DDL = (
     "CREATE TABLE IF NOT EXISTS x402_batches ("
-    "batch_id TEXT PRIMARY KEY, resource_id TEXT, status TEXT, authorization_limit_units TEXT, "
+    "batch_id TEXT PRIMARY KEY, resource_id TEXT, session_id TEXT DEFAULT '', status TEXT, authorization_limit_units TEXT, "
     "reserved_units TEXT, usage_units TEXT, settled_units TEXT, created_at TEXT, updated_at TEXT)"
 )
 

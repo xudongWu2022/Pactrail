@@ -1578,6 +1578,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                             resource_id=resource_id,
                             authorization_limit_units=authorization_limit_units,
                             batch_limit_units=str(payment_policy["batch_limit_units"]),
+                            session_id=str(guard_payload.get("session", "")),
                         )
                     except ValueError as exc:
                         store.release_reservation(request_id)
@@ -1849,9 +1850,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 return
             if parsed.path.startswith("/x402/batches/"):
                 policy = _load_policy(policy_path)
+                claims = None
                 if not self._authorized(policy):
                     try:
-                        self._capability_claims(policy)
+                        claims = self._capability_claims(policy)
                     except CapabilityError as exc:
                         self._send(401, {"error": "unauthorized", "detail": str(exc)})
                         return
@@ -1860,6 +1862,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     batch = store.x402_batch(batch_id)
                 if batch is None:
                     self._send(404, {"error": "x402_batch_not_found", "batch_id": batch_id})
+                elif claims is not None and batch["session_id"] != claims.get("session_id"):
+                    self._send(403, {"error": "payment_capability_denied"})
                 else:
                     self._send(200, {key: batch[key] for key in batch.keys()})
                 return

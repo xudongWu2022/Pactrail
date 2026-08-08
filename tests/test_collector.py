@@ -134,12 +134,17 @@ class CollectorTest(unittest.TestCase):
 
             store.reserve_x402_batch(
                 batch_id="batch-1", resource_id="metered", authorization_limit_units="40000",
-                batch_limit_units="50000",
+                batch_limit_units="50000", session_id="ses:research-a",
             )
+            with self.assertRaisesRegex(ValueError, "different spend session"):
+                store.reserve_x402_batch(
+                    batch_id="batch-1", resource_id="metered", authorization_limit_units="1000",
+                    batch_limit_units="50000", session_id="ses:research-b",
+                )
             with self.assertRaisesRegex(ValueError, "exceed its cap"):
                 store.reserve_x402_batch(
                     batch_id="batch-1", resource_id="metered", authorization_limit_units="20000",
-                    batch_limit_units="50000",
+                    batch_limit_units="50000", session_id="ses:research-a",
                 )
             store.account_x402_batch(
                 batch_id="batch-1", authorization_limit_units="40000", usage_units="12000", settled_units="12000",
@@ -149,6 +154,7 @@ class CollectorTest(unittest.TestCase):
             self.assertEqual(batch["status"], "closed")
             self.assertEqual(batch["reserved_units"], "0")
             self.assertEqual(batch["usage_units"], "12000")
+            self.assertEqual(batch["session_id"], "ses:research-a")
 
         self.assertEqual(_x402_settlement_units({"extra": {"chargedAmount": "18000"}}, "100000", "upto"), "18000")
         with self.assertRaisesRegex(ValueError, "must equal"):
