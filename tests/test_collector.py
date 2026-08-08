@@ -758,6 +758,14 @@ class CollectorTest(unittest.TestCase):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))))
                 facilitator_calls.append({"path": self.path, "body": body})
+                if self.path.endswith("/verify") and body["paymentPayload"]["payload"].get("signature") == "0xfacilitator-error":
+                    raw = b'{"error":"facilitator rejected payment"}'
+                    self.send_response(400)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 if self.path.endswith("/verify"):
                     out = {"isValid": True, "payer": "0xpayer", "extra": {}}
                 else:
@@ -925,6 +933,24 @@ class CollectorTest(unittest.TestCase):
             self.assertEqual(err.exception.code, 409)
             self.assertEqual(json.loads(err.exception.read())["error"], "replayed_x402_payment")
 
+            facilitator_error_payment = {
+                **payment,
+                "payload": {"authorization": {"from": "0xpayer"}, "signature": "0xfacilitator-error"},
+            }
+            facilitator_error_req = urllib.request.Request(
+                f"http://127.0.0.1:{gateway_port}/x402/scrape",
+                data=json.dumps({"q": "verify failure"}).encode(),
+                headers={
+                    "content-type": "application/json", "payment-signature": json.dumps(facilitator_error_payment),
+                    "x-agent-id": "research-bot", "x-budget-id": "team-research",
+                    "x-request-id": "x402-facilitator-error",
+                }, method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(facilitator_error_req, timeout=2)
+            self.assertEqual(err.exception.code, 402)
+            self.assertEqual(json.loads(err.exception.read())["error"]["reason"], "facilitator_verification_failed")
+
             status_req = urllib.request.Request(
                 f"http://127.0.0.1:{gateway_port}/x402/payments/x402-req-1", method="GET",
             )
@@ -942,7 +968,7 @@ class CollectorTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM spend_reservations WHERE status = 'active'"
                 ).fetchone()[0]
 
-        self.assertEqual([c["path"] for c in facilitator_calls], ["/verify", "/settle"])
+        self.assertEqual([c["path"] for c in facilitator_calls], ["/verify", "/settle", "/verify"])
         self.assertEqual(facilitator_calls[0]["body"]["paymentRequirements"]["amount"], "2500000")
         self.assertEqual(len(upstream_calls), 1)
         self.assertIsNone(upstream_calls[0]["payment"])

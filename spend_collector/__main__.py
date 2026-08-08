@@ -1619,11 +1619,28 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 "paymentPayload": payment_payload,
                 "paymentRequirements": requirements,
             }
-            verify_result = _facilitator_request_json(
-                facilitator.rstrip("/") + "/verify",
-                facilitator_payload,
-                resource,
-            )
+            try:
+                verify_result = _facilitator_request_json(
+                    facilitator.rstrip("/") + "/verify",
+                    facilitator_payload,
+                    resource,
+                )
+            except (FacilitatorError, OSError, ValueError) as exc:
+                # A real facilitator can return an HTTP error (for example an
+                # invalid self-payment) instead of a JSON {isValid:false}.
+                # That is still a failed verification, never a spend.
+                with SpendStore(str(db_path)) as store:
+                    store.release_reservation(request_id)
+                    store.account_x402_payment(request_id, usage_units="0", settled_units="0")
+                    if batch_id:
+                        store.account_x402_batch(batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                                                 usage_units="0", settled_units="0")
+                    store.update_x402_payment(request_id, "verification_failed", detail=str(exc))
+                self._send_x402_required(resource_id, resource, requirements, error={
+                    "reason": "facilitator_verification_failed",
+                    "message": str(exc),
+                })
+                return True
             if not verify_result.get("isValid"):
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
@@ -1642,11 +1659,25 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             with SpendStore(str(db_path)) as store:
                 store.update_x402_payment(request_id, "verified")
 
-            settle_result = _facilitator_request_json(
-                facilitator.rstrip("/") + "/settle",
-                facilitator_payload,
-                resource,
-            )
+            try:
+                settle_result = _facilitator_request_json(
+                    facilitator.rstrip("/") + "/settle",
+                    facilitator_payload,
+                    resource,
+                )
+            except (FacilitatorError, OSError, ValueError) as exc:
+                with SpendStore(str(db_path)) as store:
+                    store.release_reservation(request_id)
+                    store.account_x402_payment(request_id, usage_units="0", settled_units="0")
+                    if batch_id:
+                        store.account_x402_batch(batch_id=batch_id, authorization_limit_units=authorization_limit_units,
+                                                 usage_units="0", settled_units="0")
+                    store.update_x402_payment(request_id, "settlement_failed", detail=str(exc))
+                self._send_x402_required(resource_id, resource, requirements, error={
+                    "reason": "facilitator_settlement_failed",
+                    "message": str(exc),
+                })
+                return True
             if settle_result.get("success") is False:
                 with SpendStore(str(db_path)) as store:
                     store.release_reservation(request_id)
