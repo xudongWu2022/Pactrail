@@ -1665,6 +1665,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                                              request_id: str = "") -> None:
             """Return the merchant's x402 response without granting it Gateway-origin powers."""
             self.send_response(status)
+            # Pactrail owns CORS on browser-facing responses, including the
+            # merchant's initial 402 quote and final paid response.
+            for key, value in self._cors_headers().items():
+                self.send_header(key, value)
             for header in ("content-type", "cache-control", "payment-required", "payment-response"):
                 value = self._header(headers, header)
                 if value:

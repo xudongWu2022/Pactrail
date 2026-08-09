@@ -253,6 +253,17 @@ class PactrailTest(unittest.TestCase):
             client = PactrailClient(base, minted["capability"], "research-bot", "team", session["session_id"])
             intent = client.create_payment_intent("research")
 
+            browser_quote = urllib.request.Request(
+                base + "/x402/research", data=b'{"query":"cors"}', method="POST", headers={
+                    "origin": "http://localhost:3000", "authorization": f"Capability {minted['capability']}",
+                    "x-agent-id": "research-bot", "x-budget-id": "team", "x-session-id": session["session_id"],
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as quote_error:
+                urllib.request.urlopen(browser_quote, timeout=2)
+            self.assertEqual(quote_error.exception.code, 402)
+            self.assertEqual(quote_error.exception.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
             def signer(quote: dict) -> str:
                 return json.dumps({"x402Version": 2, "accepted": quote["accepts"][0],
                                    "payload": {"authorization": "standard"}, "resource": quote["resource"]})
