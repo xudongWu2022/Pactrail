@@ -1,0 +1,39 @@
+{
+  "gateway_tokens": ["replace-with-a-local-operator-token"],
+  "rails": ["api_x402"],
+  "budgets": {
+    "testnet-weather": 0.001
+  },
+  "max_amount": 0.001,
+  "agents": {
+    "research-bot": {
+      "budgets": ["testnet-weather"],
+      "rails": ["api_x402"],
+      "max_amount": 0.001
+    }
+  },
+  "x402_resources": {
+    "base-sepolia-weather": {
+      "url": "https://wallets-demo-seller-server.calebgcarithers.workers.dev/weather?location=San%20Francisco",
+      "resource_url": "https://wallets-demo-seller-server.calebgcarithers.workers.dev/weather?location=San%20Francisco",
+      "method": "GET",
+      "description": "External Base Sepolia x402 weather service; test USDC only",
+      "merchant": "wallets-demo-weather",
+      "agent": "research-bot",
+      "budget": "testnet-weather",
+      "amount": 0.001,
+      "amount_units": "1000",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "asset_name": "USDC",
+      "asset_decimals": 6,
+      "pay_to": "0xCBd4E4218B2Cd8300f1bd07b9B4B720fAb6B51B3",
+      "network": "eip155:84532",
+      "scheme": "exact",
+      "x402_execution": "merchant",
+      "payment_policy": {
+        "scheme": "exact"
+      },
+      "x402_version": 2
+    }
+  }
+}

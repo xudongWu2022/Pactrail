@@ -180,6 +180,7 @@ class PactrailTest(unittest.TestCase):
 
         class Merchant(BaseHTTPRequestHandler):
             seen_payment_signature = False
+            seen_gateway_user_agent = False
 
             def log_message(self, fmt, *args):
                 return
@@ -195,6 +196,7 @@ class PactrailTest(unittest.TestCase):
                 self.wfile.write(raw)
 
             def do_POST(self) -> None:
+                Merchant.seen_gateway_user_agent = self.headers.get("user-agent") == "Pactrail/0.1"
                 resource_url = f"http://{self.headers['host']}{self.path}"
                 if not self.headers.get("payment-signature"):
                     quote = {
@@ -258,6 +260,7 @@ class PactrailTest(unittest.TestCase):
             result, receipt = client.pay_x402(intent, b'{"query":"standard"}', signer)
             self.assertTrue(result["ok"])
             self.assertTrue(Merchant.seen_payment_signature)
+            self.assertTrue(Merchant.seen_gateway_user_agent)
             self.assertEqual(receipt["status"], "delivered")
             self.assertEqual(receipt["transaction_ref"], "merchant:standard-test")
             self.assertEqual(receipt["intent_status"], "delivered")

@@ -30,7 +30,7 @@ Create a short session from a trusted terminal, replacing the placeholders:
 $headers = @{ Authorization = "Bearer <admin-token>"; "Content-Type" = "application/json" }
 $session = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8787/sessions -Headers $headers -Body (@{
   parent_task = "cdp-wallet-demo"; budget_id = "team-research"; cap = 0.10
-  constraints = @{ resource_ids = @("sandbox-search"); merchants = @("local-x402-sandbox"); networks = @("eip155:84532"); assets = @("USDC"); schemes = @("exact") }
+  constraints = @{ resource_ids = @("sandbox-search"); merchants = @("local-x402-sandbox"); networks = @("eip155:84532"); assets = @("0x036CbD53842c5426634e7929541eC2318f3dCF7e"); schemes = @("exact") }
 } | ConvertTo-Json -Depth 5)
 
 $capability = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8787/capabilities -Headers $headers -Body (@{

@@ -1601,6 +1601,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 str(key): str(value) for key, value in self.headers.items()
                 if key.lower() in allowed
             }
+            # Identify the gateway explicitly. Some public merchants block
+            # Python's default User-Agent while accepting normal HTTP clients.
+            # This value is gateway-owned, never inherited from the Agent.
+            headers["user-agent"] = "Pactrail/0.1"
             for header, env_name in resource.get("headers_env", {}).items():
                 value = os.environ.get(str(env_name))
                 if value:
