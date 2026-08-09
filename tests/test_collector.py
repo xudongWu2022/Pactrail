@@ -374,7 +374,9 @@ class CollectorTest(unittest.TestCase):
         store, budgets = self.build_demo_store()
         html = render(store, budgets, run_all(store, budgets))
 
-        self.assertIn("Agent Spend Console", html)
+        self.assertIn("Pactrail payment control plane", html)
+        self.assertIn("Payment lifecycle", html)
+        self.assertIn("Spend observability", html)
         self.assertIn("Rail Mix", html)
         self.assertIn("Budget Burn", html)
         self.assertIn("Security Signals", html)
@@ -2081,7 +2083,7 @@ class CollectorTest(unittest.TestCase):
                 body = resp.read().decode()
                 self.assertEqual(resp.status, 200)
                 self.assertIn("text/html", resp.headers.get("content-type", ""))
-            self.assertIn("Agent Spend Console", body)
+            self.assertIn("Pactrail payment control plane", body)
             self.assertIn("study-abroad-api", body)
 
             with self.assertRaises(urllib.error.HTTPError) as err:  # no token -> 401

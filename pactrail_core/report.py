@@ -13,7 +13,7 @@ _HEAD = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Spend</title>
+<title>Pactrail Control Plane</title>
 <style>
 :root{
   color-scheme:light;
@@ -29,6 +29,11 @@ h2{margin:0 0 12px;font-size:15px;font-weight:720}
 .sub{margin:6px 0 0;color:var(--muted)}
 .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:#fff;padding:7px 10px;border-radius:999px;color:#344054;white-space:nowrap}
 .dot{width:8px;height:8px;border-radius:999px;background:var(--green)}
+.eyebrow{color:var(--green);font-weight:760;font-size:11px;letter-spacing:.12em;text-transform:uppercase;margin:0 0 7px}
+.tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:0 0 18px}.tab{appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font:inherit;font-weight:700;padding:10px 2px;cursor:pointer;margin-right:18px}.tab.active{color:var(--green);border-bottom-color:var(--green)}
+.view[hidden]{display:none}.section-intro{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:0 0 14px}.section-intro h2{font-size:18px;margin:0}.section-intro .meta{max-width:620px}
+.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:18px}.flow-step{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:13px;min-height:78px}.flow-step:not(:last-child):after{content:'→';position:absolute;right:-9px;top:26px;color:var(--muted);font-size:17px;z-index:1}.flow-step .label{margin-bottom:7px}.flow-step .value{font-size:17px;margin:0}.flow-step .meta{margin-top:4px}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.status{font-weight:720;text-transform:capitalize}.status.settled,.status.delivered{color:var(--green)}.status.denied,.status.verification_failed,.status.settlement_failed,.status.delivery_failed{color:var(--red)}.status.pending,.status.signer_approval_pending{color:var(--amber)}
 .grid{display:grid;gap:14px}
 .metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}
 .metric{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:15px 16px;min-height:92px}
@@ -61,7 +66,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .footer{color:var(--muted);font-size:12px;margin-top:18px}
 @media (max-width:860px){
   header{display:block}.badge{margin-top:12px}.metrics,.two{grid-template-columns:1fr}
-  .alert{grid-template-columns:1fr}.row{grid-template-columns:1fr}.money{text-align:left}
+  .alert{grid-template-columns:1fr}.row{grid-template-columns:1fr}.money{text-align:left}.flow{grid-template-columns:1fr}.flow-step:not(:last-child):after{content:'↓';right:15px;top:auto;bottom:-16px}
   th:nth-child(4),td:nth-child(4){display:none}
 }
 </style>
@@ -261,6 +266,110 @@ def _section_gateway(store: SpendStore) -> str:
     return "".join(p)
 
 
+def _status(value: object) -> str:
+    """Render a status without trusting ledger text as HTML or CSS."""
+    raw = str(value or "unknown")
+    safe_class = "".join(char if char.isalnum() or char == "_" else "-" for char in raw.lower())
+    return f"<span class='status {escape(safe_class)}'>{escape(raw.replace('_', ' '))}</span>"
+
+
+def _control_metrics(store: SpendStore) -> str:
+    now = datetime.now(timezone.utc).isoformat()
+    active_sessions = store.db.execute(
+        "SELECT COUNT(*) FROM spend_sessions WHERE status = 'active' AND expires_at > ?", (now,)
+    ).fetchone()[0]
+    active_holds = store.db.execute(
+        "SELECT COUNT(*) FROM spend_reservations WHERE status = 'active' AND expires_at > ?", (now,)
+    ).fetchone()[0]
+    pending_approvals = store.db.execute(
+        "SELECT COUNT(*) FROM signer_approvals WHERE status = 'pending' AND expires_at > ?", (now,)
+    ).fetchone()[0]
+    settled = store.db.execute(
+        "SELECT COUNT(*) FROM x402_payments WHERE status IN ('settled', 'delivered')"
+    ).fetchone()[0]
+    return (
+        "<section class='grid metrics'>"
+        f"<div class='metric'><div class='label'>Active spend sessions</div><div class='value'>{active_sessions}</div>"
+        "<div class='meta'>Task-scoped payment authority</div></div>"
+        f"<div class='metric'><div class='label'>Active budget holds</div><div class='value'>{active_holds}</div>"
+        "<div class='meta'>Reserved before settlement</div></div>"
+        f"<div class='metric'><div class='label'>Signer approvals</div><div class='value'>{pending_approvals}</div>"
+        "<div class='meta'>Pending one-time authorizations</div></div>"
+        f"<div class='metric'><div class='label'>x402 settled</div><div class='value'>{settled}</div>"
+        "<div class='meta'>Verified payment lifecycle records</div></div>"
+        "</section>"
+    )
+
+
+def _section_payment_lifecycle(store: SpendStore) -> str:
+    rows = store.db.execute(
+        "SELECT i.request_id, i.session_id, i.resource_id, i.agent_id, i.status AS intent_status, "
+        "p.scheme, p.authorization_limit_units, p.usage_units, p.settled_units, p.status AS payment_status, "
+        "p.transaction_ref, a.status AS approval_status "
+        "FROM payment_intents i "
+        "LEFT JOIN x402_payments p ON p.request_id = i.request_id "
+        "LEFT JOIN signer_approvals a ON a.request_id = i.request_id "
+        "ORDER BY i.updated_at DESC LIMIT 12"
+    ).fetchall()
+    p = ["<section class='panel'><h2>Payment lifecycle</h2>"
+         "<div class='meta'>Every row ties an agent request to its policy decision, signer approval, and settlement receipt.</div>"
+         "<table><tr><th>Request</th><th>Agent / resource</th><th>Scheme</th><th>Authorization → settled</th><th>Lifecycle</th></tr>"]
+    if not rows:
+        p.append("<tr><td colspan='5'>No x402 payment intents yet. Start with the sandbox demo to create an auditable lifecycle.</td></tr>")
+    for row in rows:
+        amounts = " → ".join(escape(str(row[key] or "—")) for key in ("authorization_limit_units", "settled_units"))
+        statuses = [_status(row["intent_status"])]
+        if row["approval_status"]:
+            statuses.append(_status(row["approval_status"]))
+        if row["payment_status"]:
+            statuses.append(_status(row["payment_status"]))
+        p.append(
+            "<tr>"
+            f"<td><div class='mono'>{escape(row['request_id'])}</div><div class='meta'>{escape(row['session_id'])}</div></td>"
+            f"<td><div class='name'>{escape(row['agent_id'])}</div><div class='meta'>{escape(row['resource_id'])}</div></td>"
+            f"<td>{escape(str(row['scheme'] or 'awaiting quote'))}</td>"
+            f"<td><div class='mono'>{amounts}</div><div class='meta'>protocol units</div></td>"
+            f"<td>{'<br>'.join(statuses)}"
+            f"<div class='meta mono'>{escape(str(row['transaction_ref'] or ''))}</div></td>"
+            "</tr>"
+        )
+    p.append("</table></section>")
+    return "".join(p)
+
+
+def _section_sessions_and_approvals(store: SpendStore) -> str:
+    now = datetime.now(timezone.utc).isoformat()
+    sessions = store.db.execute(
+        "SELECT session_id, parent_task, budget_id, cap, expires_at, status FROM spend_sessions "
+        "ORDER BY updated_at DESC LIMIT 8"
+    ).fetchall()
+    approvals = store.db.execute(
+        "SELECT approval_id, request_id, signer_id, status, expires_at FROM signer_approvals "
+        "ORDER BY updated_at DESC LIMIT 8"
+    ).fetchall()
+    p = ["<section class='grid two'>",
+         "<section class='panel'><h2>Spend sessions</h2><table><tr><th>Task / budget</th><th>Cap</th><th>Status</th></tr>"]
+    if not sessions:
+        p.append("<tr><td colspan='3'>No sessions yet.</td></tr>")
+    for row in sessions:
+        status = "expired" if row["status"] == "active" and row["expires_at"] <= now else row["status"]
+        p.append(
+            f"<tr><td><div class='mono'>{escape(row['parent_task'])}</div><div class='meta'>{escape(row['session_id'])} · {escape(row['budget_id'])}</div></td>"
+            f"<td>{_money(float(row['cap']))}</td><td>{_status(status)}</td></tr>"
+        )
+    p.append("</table></section>")
+    p.append("<section class='panel'><h2>Signer approvals</h2><table><tr><th>Signer / request</th><th>Expires</th><th>Status</th></tr>")
+    if not approvals:
+        p.append("<tr><td colspan='3'>No signer approvals yet. The wallet is never exposed to the agent.</td></tr>")
+    for row in approvals:
+        p.append(
+            f"<tr><td><div class='name'>{escape(row['signer_id'])}</div><div class='meta mono'>{escape(row['request_id'])}</div></td>"
+            f"<td class='mono'>{escape(row['expires_at'])}</td><td>{_status(row['status'])}</td></tr>"
+        )
+    p.append("</table></section></section>")
+    return "".join(p)
+
+
 def _section_agent_rail(store: SpendStore) -> str:
     p = ["<section class='panel'><h2>Agent x Rail</h2><table><tr>"
          "<th>Agent</th><th>Rail</th><th>Events</th><th class='num'>Spend</th></tr>"]
@@ -305,22 +414,44 @@ def render(store: SpendStore, caps: dict[str, float], alerts: list[Alert],
         )
     p = [head]
     p.append(
-        "<header><div><h1>Agent Spend Console</h1>"
-        "<p class='sub'>Read-only cross-rail ledger and Phase-0 security signals.</p></div>"
-        "<div class='badge'><span class='dot'></span>observer mode</div></header>"
+        "<header><div><p class='eyebrow'>Pactrail payment control plane</p><h1>Agent spend, constrained before it is signed.</h1>"
+        "<p class='sub'>Control x402 payment authority, then retain a verifiable receipt and cross-rail audit trail.</p></div>"
+        "<div class='badge'><span class='dot'></span>gateway online</div></header>"
     )
+    p.append("<nav class='tabs' aria-label='Pactrail views'>"
+             "<button class='tab active' type='button' data-view='control'>Control plane</button>"
+             "<button class='tab' type='button' data-view='observability'>Spend observability</button></nav>")
+    p.append("<main class='view' data-panel='control'>"
+             "<div class='section-intro'><div><h2>Payment authority and execution</h2>"
+             "<p class='meta'>The wallet key stays outside Pactrail. The gateway approves bounded intents, and an external signer can only sign a matching one-time approval.</p>"
+             "</div></div>")
+    p.append("<section class='flow' aria-label='Pactrail payment lifecycle'>"
+             "<div class='flow-step'><div class='label'>1. Agent</div><div class='value'>Payment intent</div><div class='meta'>resource + task</div></div>"
+             "<div class='flow-step'><div class='label'>2. Pactrail</div><div class='value'>Policy decision</div><div class='meta'>budget + merchant</div></div>"
+             "<div class='flow-step'><div class='label'>3. Signer</div><div class='value'>One-time approval</div><div class='meta'>no key to agent</div></div>"
+             "<div class='flow-step'><div class='label'>4. x402</div><div class='value'>Verify + settle</div><div class='meta'>facilitator</div></div>"
+             "<div class='flow-step'><div class='label'>5. Receipt</div><div class='value'>Audit record</div><div class='meta'>intent → settlement</div></div></section>")
+    p.append(_control_metrics(store))
+    p.append(_section_payment_lifecycle(store))
+    p.append(_section_sessions_and_approvals(store))
+    p.append(_section_gateway(store))
+    p.append("</main>")
+    p.append("<main class='view' data-panel='observability' hidden>"
+             "<div class='section-intro'><div><h2>Spend observability</h2>"
+             "<p class='meta'>The original cross-rail ledger remains useful after the payment decision: it joins token, API, card, stablecoin, and cloud spend into one audit view.</p>"
+             "</div></div>")
     p.append(_section_metrics(store, alerts))
     p.append("<section class='grid two'>")
     p.append(_section_rail_mix(store))
     p.append(_section_budgets(store, caps))
     p.append("</section>")
     p.append(_section_alerts(alerts))
-    p.append(_section_gateway(store))
     p.append("<section class='grid two'>")
     p.append(_section_agent_rail(store))
     p.append(_section_events(store))
-    p.append("</section>")
-    p.append("<p class='footer'>This report is generated locally from the ledger and gateway audit log. "
-             "The gateway can enforce policy only when agents route spend through it.</p>")
+    p.append("</section></main>")
+    p.append("<p class='footer'>Pactrail enforces policy only when agents route payment through its gateway. "
+             "Observability records metadata and receipts, never wallet keys or prompts.</p>")
+    p.append("<script>document.querySelectorAll('[data-view]').forEach(function(button){button.addEventListener('click',function(){var view=button.dataset.view;document.querySelectorAll('[data-panel]').forEach(function(panel){panel.hidden=panel.dataset.panel!==view;});document.querySelectorAll('[data-view]').forEach(function(tab){tab.classList.toggle('active',tab===button);});});});</script>")
     p.append(_TAIL)
     return "".join(p)

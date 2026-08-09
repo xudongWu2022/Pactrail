@@ -11,12 +11,14 @@ data, so it does not expose provider keys, wallet keys, prompts, or real spend.
 
    Open `http://127.0.0.1:8787/dashboard?token=dev-gateway-token`.
 
-2. Show the ledger view (0:30-1:20). Point out total spend, rail mix, budget burn,
-   and the four fixture rails: LLM token, x402, USDC, and Stripe.
+2. Start on the **Control plane** view (0:30-1:20). Explain the lifecycle:
+   Agent payment intent → Pactrail policy decision → wallet/signer approval →
+   x402 settlement → receipt. Point out active sessions, budget holds, signer
+   approvals, and the payment lifecycle table.
 
-3. Show security signals (1:20-2:00). Scroll to the alerts and call out the seeded
-   spend spike, budget burn, burn rate, spend per task, new-key spike, and
-   new-merchant/provider cases.
+3. Switch to **Spend observability** (1:20-2:00). Point out total spend, rail
+   mix, budget burn, then the seeded spend spike, burn rate, spend per task,
+   new-key spike, and new-merchant/provider signals.
 
 4. Show pre-spend enforcement (2:00-2:35).
 
@@ -25,7 +27,7 @@ data, so it does not expose provider keys, wallet keys, prompts, or real spend.
    ```
 
    Repeat with `"amount": 9` to show a deny. Refresh the dashboard to show the
-   decision in the audit section.
+   decision in the control-plane audit section.
 
 5. Close with a provider integration (2:35-3:00). Set a provider key only in the
    gateway terminal, then run `python3 examples/openai_gateway.py`. Explain that the

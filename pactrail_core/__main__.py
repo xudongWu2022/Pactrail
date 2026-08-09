@@ -2302,6 +2302,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pactrail",
         description="Pactrail Gateway and spend observability CLI.",
+        epilog=(
+            "Command families:\n"
+            "  Start and test: demo, demo-live, gateway, x402-sandbox, run-scenarios\n"
+            "  Control and policy: guard, validate-policy, audit-config, freeze, unfreeze\n"
+            "  x402 discovery: check-facilitator, fetch-bazaar, filter-bazaar, adopt-bazaar\n"
+            "  Observability: pull*, report, simulate-spend\n"
+            "See docs/PRODUCT_MAP.md for the product map."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--out-dir", default=".", help="directory for report.html and JSON artifacts")
     common = argparse.ArgumentParser(add_help=False)
