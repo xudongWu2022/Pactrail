@@ -2100,7 +2100,10 @@ class CollectorTest(unittest.TestCase):
             self.addCleanup(lambda: (gateway_server.shutdown(), thread.join(1), gateway_server.server_close()))
             self.wait_for_http(f"http://127.0.0.1:{port}/health")
 
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/dashboard?token=dash-token", timeout=2) as resp:
+            dashboard = urllib.request.Request(
+                f"http://127.0.0.1:{port}/dashboard", headers={"authorization": "Bearer dash-token"}
+            )
+            with urllib.request.urlopen(dashboard, timeout=2) as resp:
                 body = resp.read().decode()
                 self.assertEqual(resp.status, 200)
                 self.assertIn("text/html", resp.headers.get("content-type", ""))

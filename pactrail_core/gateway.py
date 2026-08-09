@@ -281,6 +281,7 @@ def validate_policy(policy: dict) -> list[str]:
         "deny_new_merchants", "agents", "merchants", "targets", "providers",
         "gateway_tokens", "reservation_ttl_seconds", "x402_resources",
         "capability_secret_env", "signer_adapters", "require_signer_approval",
+        "deployment_mode", "public_base_url",
         "content_guard", "frozen_agents", "frozen_budgets", "block_on_anomaly",
         "block_on_anomaly_lookback_hours",
     }
@@ -319,6 +320,15 @@ def validate_policy(policy: dict) -> list[str]:
 
     if has_raw_api_key(policy):
         errors.append("policy must not contain raw api_key values; use api_key_env")
+
+    mode = policy.get("deployment_mode", "development")
+    if mode not in {"development", "production"}:
+        errors.append("deployment_mode must be development or production")
+    public_base_url = policy.get("public_base_url")
+    if public_base_url is not None:
+        parsed_public_url = urlsplit(str(public_base_url))
+        if parsed_public_url.scheme != "https" or not parsed_public_url.netloc:
+            errors.append("public_base_url must be an https URL")
 
     signer_adapters = policy.get("signer_adapters", {})
     if not isinstance(signer_adapters, dict):
@@ -451,6 +461,22 @@ def validate_policy(policy: dict) -> list[str]:
             if "authorization" in key.lower() or str(value).startswith(("sk-", "rk_")):
                 errors.append(f"x402 resource {name} header {key} looks like a raw secret; use headers_env")
 
+    if mode == "production":
+        if not policy.get("gateway_tokens"):
+            errors.append("production requires gateway_tokens or SPEND_GATEWAY_TOKEN")
+        if not policy.get("public_base_url"):
+            errors.append("production requires an https public_base_url behind a TLS proxy")
+        if not policy.get("require_signer_approval"):
+            errors.append("production requires require_signer_approval=true")
+        if not policy.get("signer_adapters"):
+            errors.append("production requires at least one wallet signer adapter")
+        for name, resource in policy.get("x402_resources", {}).items():
+            for key in ("url", "facilitator_url"):
+                value = resource.get(key)
+                parsed = urlsplit(str(value or ""))
+                if parsed.scheme != "https" or not parsed.netloc:
+                    errors.append(f"production x402 resource {name} {key} must be an https URL")
+
     return errors
 
 
@@ -459,6 +485,15 @@ def require_valid_policy(policy: dict, *, env_token: str | None = None) -> None:
     if env_token and not check.get("gateway_tokens"):
         check["gateway_tokens"] = [env_token]
     errors = validate_policy(check)
+    if check.get("deployment_mode", "development") == "production":
+        import os
+        capability_env = str(check.get("capability_secret_env", "PACTRAIL_CAPABILITY_SECRET"))
+        if not os.environ.get(capability_env):
+            errors.append(f"production requires {capability_env} to be set")
+        for signer_id, adapter in (check.get("signer_adapters") or {}).items():
+            auth_env = str(adapter.get("auth_env", ""))
+            if not os.environ.get(auth_env):
+                errors.append(f"production signer adapter {signer_id} requires {auth_env} to be set")
     if errors:
         raise PolicyError("; ".join(errors))
 
@@ -489,8 +524,10 @@ def audit_config(policy: dict, *, db_path: str = "spend.db", out_dir: str = "art
     for adapter in policy.get("signer_adapters", {}).values():
         if adapter.get("auth_env"):
             env_vars.add(adapter["auth_env"])
-    if policy.get("providers") or policy.get("targets"):
+    if policy.get("providers") or policy.get("targets") or policy.get("x402_resources"):
         env_vars.add("SPEND_GATEWAY_TOKEN")
+    if policy.get("x402_resources"):
+        env_vars.add(str(policy.get("capability_secret_env", "PACTRAIL_CAPABILITY_SECRET")))
     return {
         "env_vars_read": sorted(env_vars),
         "outbound_hosts": sorted(h for h in hosts if h),

@@ -10,9 +10,10 @@ depend on a hosted control plane.
 - Store real provider keys in environment variables or a secret manager.
 - Put only environment variable names in policy files, for example
   `api_key_env: "OPENAI_API_KEY"`.
-- Give agents gateway tokens, not provider keys.
-- The gateway swaps a gateway token for the provider key only after an allow
-  decision.
+- Give Agents short-lived Payment Capabilities, not provider keys, administrator
+  credentials, or wallet access.
+- Keep `SPEND_GATEWAY_TOKEN` with the administrator. It creates Sessions and
+  Capabilities; it is never an Agent credential.
 - The gateway does not send data to project-owned servers.
 - Audit logs store metadata only: agent, rail, provider, amount, budget,
   decision, and reasons.
@@ -31,9 +32,28 @@ Use least-privilege credentials where providers support them:
 - Gateway-held provider keys for inline model/API calls.
 - Limited wallet permissions or spend-limited wallets for payment rails.
 
-For production, set `SPEND_GATEWAY_TOKEN` or `gateway_tokens` in policy whenever
-`providers` or `targets` are configured. The gateway refuses to start forwarding
-routes without gateway authentication.
+For local sandbox development, Pactrail defaults to `deployment_mode:
+"development"` and binds to loopback by default. This keeps the first-run path
+small; do not expose that mode to the internet.
+
+For production, declare `deployment_mode: "production"`. Pactrail then refuses
+to start unless all of the following are present:
+
+- A gateway administrator credential (`gateway_tokens` or
+  `SPEND_GATEWAY_TOKEN`).
+- A server-side `PACTRAIL_CAPABILITY_SECRET` (or configured equivalent).
+- `require_signer_approval: true` and a configured wallet adapter credential.
+- An HTTPS `public_base_url`, intended to sit behind your TLS reverse proxy.
+- HTTPS merchant and facilitator URLs for every x402 resource.
+
+The wallet adapter is not a second policy engine. It is the connection between
+Pactrail's already-approved payment and the user's wallet. Small self-hosted
+setups may run it inside their wallet UI; keep it separate from the Agent when
+the wallet SDK needs isolation. Never put its credential in an Agent process or
+browser bundle.
+
+Pactrail never accepts credentials in dashboard query strings. Put an
+authenticated dashboard behind your own same-origin admin UI or reverse proxy.
 
 ## Reporting Vulnerabilities
 

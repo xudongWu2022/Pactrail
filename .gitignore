@@ -9,3 +9,11 @@ artifacts-*/
 dist/
 *.egg-info/
 PROJECT_MEMORY.md
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*api_key*.json
+*apikey*.json
+*secret*.json

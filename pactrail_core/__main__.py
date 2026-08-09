@@ -22,6 +22,7 @@ from .detectors import run_all
 from .gateway import (
     GuardDecision,
     GuardRequest,
+    PolicyError,
     audit_config as build_audit_config,
     cap_for_request,
     decide,
@@ -1349,6 +1350,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 length = int(self.headers.get("content-length", "0") or 0)
             except ValueError as exc:
                 raise ValueError("content-length must be an integer") from exc
+            if length < 0:
+                raise ValueError("content-length must not be negative")
             max_bytes = int(policy.get("max_request_bytes", DEFAULT_MAX_REQUEST_BYTES))
             if length > max_bytes:
                 raise PayloadTooLarge(f"request body {length} bytes exceeds max_request_bytes {max_bytes}")
@@ -1383,7 +1386,9 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if env_token:
                 tokens = list(tokens or []) + [env_token]
             if not tokens:
-                return True
+                # Local development stays one-command friendly. Production is
+                # fail-closed even if a bad policy somehow reached this point.
+                return policy.get("deployment_mode", "development") != "production"
             auth = self.headers.get("authorization", "")
             bearer = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
             supplied = token or bearer or self.headers.get("x-gateway-token", "")
@@ -1571,7 +1576,13 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 method=method,
             )
             payment_header = json.dumps(payment_response, separators=(",", ":"))
-            with urllib.request.urlopen(req, timeout=float(resource.get("timeout", 30))) as resp:
+            # A paid request must never silently carry its body or configured
+            # merchant headers to a redirect destination.
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, request, fp, code, msg, headers, newurl):
+                    return None
+            opener = urllib.request.build_opener(_NoRedirect)
+            with opener.open(req, timeout=float(resource.get("timeout", 30))) as resp:
                 self._send_upstream(resp, extra_headers={
                     "payment-response": payment_header,
                     "x-payment-response": payment_header,
@@ -1612,7 +1623,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                         return True
                 guard_payload.update({"agent": intent["agent_id"], "budget": intent["budget_id"], "session": intent["session_id"]})
                 session_cap = float(session["cap"])
-            elif self._capability_secret(policy):
+            elif self._capability_secret(policy) or policy.get("deployment_mode", "development") == "production":
                 try:
                     claims = self._capability_claims(policy)
                 except CapabilityError as exc:
@@ -2043,8 +2054,9 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 return
             if parsed.path in ("/", "/dashboard"):
                 policy = _load_policy(policy_path)
-                token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
-                if not self._authorized(policy, token):
+                # Never accept credentials in a query string: URLs end up in
+                # browser history, proxy logs and Referer headers.
+                if not self._authorized(policy):
                     self._send(401, {"error": "unauthorized"})
                     return
                 budgets = _load_budgets(policy.get("budgets") or {})
@@ -2218,6 +2230,10 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     if session is None or session["status"] != "active":
                         self._send(404, {"error": "spend_session_not_found", "session_id": session_id})
                         return
+                    requested_budget = payload.get("budget_id")
+                    if requested_budget is not None and str(requested_budget) != str(session["budget_id"]):
+                        self._send(403, {"error": "payment_capability_budget_must_match_session"})
+                        return
                     ttl = min(int(payload.get("expires_in_seconds", 900)), 3600)
                     session_constraints = json.loads(session["constraints_json"] or "{}")
                     resource_ids = list(payload.get("resource_ids") or session_constraints.get("resource_ids") or [])
@@ -2243,7 +2259,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                             return
                     claims = {
                         "session_id": session_id, "agent_id": str(payload["agent_id"]),
-                        "budget_id": str(payload.get("budget_id", session["budget_id"])),
+                        "budget_id": str(session["budget_id"]),
                         **requested,
                         "exp": min(int(time.time()) + ttl, int(datetime.fromisoformat(session["expires_at"]).timestamp())),
                     }
@@ -2353,12 +2369,10 @@ def gateway(db_path: str | Path = "spend.db", policy_path: str | Path | None = N
 
 def validate_policy_cmd(policy_path: str) -> None:
     policy = _load_policy(policy_path)
-    check = dict(policy)
-    if os.environ.get("SPEND_GATEWAY_TOKEN") and not check.get("gateway_tokens"):
-        check["gateway_tokens"] = [os.environ["SPEND_GATEWAY_TOKEN"]]
-    errors = validate_policy_data(check)
-    if errors:
-        for error in errors:
+    try:
+        require_valid_policy(policy, env_token=os.environ.get("SPEND_GATEWAY_TOKEN"))
+    except PolicyError as exc:
+        for error in str(exc).split("; "):
             print(f"error: {error}")
         sys.exit(1)
     print("policy OK")

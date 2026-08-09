@@ -1,4 +1,4 @@
-# Production signer trust boundary
+# Production wallet-adapter trust boundary
 
 This protocol prevents an Agent from using a general-purpose wallet signing
 function. The Agent receives a Payment Capability; the signer adapter receives
@@ -34,10 +34,13 @@ variable instead:
 }
 ```
 
-Run the signer adapter in a wallet-controlled process or service, separate from
-the Agent runtime. In production, use HTTPS and an authenticated service-to-
-service channel for that adapter. Do not put `PACTRAIL_CDP_SIGNER_TOKEN` in an
-Agent environment, browser bundle, policy file, database, logs, or Git.
+This is a wallet adapter, not a second policy engine: Pactrail remains the
+single place that approves budget, merchant and payment rules. For a small
+developer's local setup, the adapter can live inside the wallet UI. Run it as a
+separate service only when the wallet SDK must be isolated from the Agent
+runtime. In production, use HTTPS and an authenticated service-to-service
+channel for that adapter. Do not put `PACTRAIL_CDP_SIGNER_TOKEN` in an Agent
+environment, browser bundle, policy file, database, logs, or Git.
 
 ## Agent side
 

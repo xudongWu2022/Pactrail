@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from pactrail_core.__main__ import make_gateway_server
+from pactrail_core.gateway import PolicyError, require_valid_policy
 from pactrail_core.capabilities import CapabilityError, mint_capability, verify_capability
 from pactrail_core.x402_sandbox import make_x402_sandbox
 from pactrail import PactrailClient, PactrailError, PactrailSignerAdapter
@@ -70,6 +71,12 @@ class PactrailTest(unittest.TestCase):
             self.assertEqual(minted["claims"]["networks"], ["eip155:84532"])
             self.assertEqual(minted["claims"]["assets"], ["0xUSDC"])
             self.assertEqual(minted["claims"]["schemes"], ["exact"])
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                post("/capabilities", {
+                    "session_id": session["session_id"], "agent_id": "research-bot",
+                    "resource_ids": ["research"], "budget_id": "other-budget",
+                }, "Bearer admin-token")
+            self.assertEqual(error.exception.code, 403)
             status, intent = post("/payment-intents", {"resource_id": "research"}, f"Capability {minted['capability']}")
             self.assertEqual(status, 201)
             self.assertEqual(intent["session_id"], session["session_id"])
@@ -82,6 +89,32 @@ class PactrailTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 post("/payment-intents", {"resource_id": "research"}, f"Capability {minted['capability']}")
             self.assertEqual(error.exception.code, 401)
+
+    def test_production_policy_fails_closed_without_required_secrets(self) -> None:
+        policy = {
+            "deployment_mode": "production",
+            "gateway_tokens": ["admin-token"],
+            "public_base_url": "https://pactrail.example",
+            "require_signer_approval": True,
+            "signer_adapters": {"wallet-ui": {"auth_env": "PACTRAIL_TEST_PROD_SIGNER"}},
+        }
+        old_capability = os.environ.pop("PACTRAIL_CAPABILITY_SECRET", None)
+        old_signer = os.environ.pop("PACTRAIL_TEST_PROD_SIGNER", None)
+        try:
+            with self.assertRaisesRegex(PolicyError, "PACTRAIL_CAPABILITY_SECRET"):
+                require_valid_policy(policy)
+            os.environ["PACTRAIL_CAPABILITY_SECRET"] = "test-capability-secret"
+            os.environ["PACTRAIL_TEST_PROD_SIGNER"] = "test-signer-secret"
+            require_valid_policy(policy)
+        finally:
+            if old_capability is not None:
+                os.environ["PACTRAIL_CAPABILITY_SECRET"] = old_capability
+            else:
+                os.environ.pop("PACTRAIL_CAPABILITY_SECRET", None)
+            if old_signer is not None:
+                os.environ["PACTRAIL_TEST_PROD_SIGNER"] = old_signer
+            else:
+                os.environ.pop("PACTRAIL_TEST_PROD_SIGNER", None)
 
     def test_sdk_runs_quote_sign_retry_and_receipt_with_external_signer_mock(self) -> None:
         old_secret = os.environ.get("PACTRAIL_CAPABILITY_SECRET")
