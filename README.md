@@ -9,13 +9,21 @@ Pactrail is self-hosted, MIT-licensed and never custody of a wallet key.
 
 ```mermaid
 flowchart LR
-  A[Agent / MCP / workflow] -->|short-lived capability| P[Pactrail gateway]
-  P -->|policy allow + x402 quote| W[External wallet signer]
-  W -->|signed payment| P
-  P --> F[Facilitator]
-  F --> M[Paid API / merchant]
+  A[Agent / MCP / workflow] -->|capability + service request| P[Pactrail gateway]
+  P --> I[Payment Intent\ninternal control + audit record]
+  I -->|unpaid resource request| M[Paid API / merchant]
+  M -->|402: actual price, asset, network, payTo, scheme| P
+  P -->|evaluate the actual quote\nbudget + merchant + network + asset + scheme| W[External wallet signer]
+  W -->|signed one-time payment authorization| P
+  P -->|retry request with payment| F[Facilitator]
+  F -->|verify + settle| M
   P --> R[Receipt + spend ledger]
 ```
+
+`Payment Intent` is an internal Pactrail record that binds the upcoming attempt
+to an agent, budget, session and capability. It is **not** a wallet signature,
+a merchant quote, a USDC transfer, or a budget charge. The merchant's `402`
+quote remains the source of truth for the concrete payment terms.
 
 ## Start here: 60-second Base Sepolia payment path
 
@@ -24,8 +32,9 @@ flowchart LR
    external signer and test USDC are ready.
 2. An administrator creates a Spend Session and mints a 15-minute capability
    limited to `research-bot`, `team-research` and approved resources.
-3. Your Python Agent calls `PactrailClient.create_payment_intent()`, signs the
-   returned x402 V2 quote with its external CDP/non-custodial signer, and retries.
+3. Your Python Agent creates Pactrail's internal payment intent, then
+   `pay_x402()` obtains the merchant's x402 V2 quote, invokes its external
+   CDP/non-custodial signer if Pactrail allows that quote, and retries.
 4. Read the receipt. For `upto`, Pactrail records authorization, actual usage,
    settlement and released balance separately.
 
