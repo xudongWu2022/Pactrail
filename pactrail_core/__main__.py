@@ -1589,11 +1589,219 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     "x-pactrail-request-id": request_id,
                 })
 
+        def _merchant_x402_headers(self, resource: dict, *, include_payment: bool) -> dict[str, str]:
+            """Use a narrow allowlist when proxying a standard x402 merchant.
+
+            The merchant receives the original payment proof on the retry, but
+            never Gateway credentials, browser cookies, or arbitrary proxy
+            headers supplied by an Agent.
+            """
+            allowed = {"accept", "accept-language", "content-type", "idempotency-key"}
+            headers = {
+                str(key): str(value) for key, value in self.headers.items()
+                if key.lower() in allowed
+            }
+            for header, env_name in resource.get("headers_env", {}).items():
+                value = os.environ.get(str(env_name))
+                if value:
+                    headers[str(header)] = value
+            headers.update({str(key): str(value) for key, value in resource.get("headers", {}).items()})
+            if include_payment:
+                signature = self.headers.get("payment-signature", "")
+                if not signature:
+                    raise ValueError("standard x402 retry requires PAYMENT-SIGNATURE")
+                headers["payment-signature"] = signature
+            return headers
+
+        def _merchant_x402_request(self, resource: dict, *, include_payment: bool) -> tuple[int, dict[str, str], bytes]:
+            body = getattr(self, "_raw_body", b"")
+            method = str(resource.get("method", self.command)).upper()
+            request = urllib.request.Request(
+                str(resource["url"]), data=None if method == "GET" else body,
+                headers=self._merchant_x402_headers(resource, include_payment=include_payment), method=method,
+            )
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, request, fp, code, msg, headers, newurl):
+                    return None
+            try:
+                with urllib.request.build_opener(_NoRedirect).open(
+                    request, timeout=float(resource.get("timeout", 30))
+                ) as response:
+                    return response.status, dict(response.headers.items()), response.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, dict(exc.headers.items()), exc.read()
+
+        @staticmethod
+        def _header(headers: dict[str, str], name: str) -> str:
+            for key, value in headers.items():
+                if key.lower() == name.lower():
+                    return str(value)
+            return ""
+
+        def _validate_merchant_quote(self, resource_id: str, resource: dict, encoded: str) -> dict:
+            quote = _decode_x402_header(encoded)
+            expected = _x402_payment_requirements(resource)
+            expected_url = str(resource.get("resource_url") or resource.get("url") or "")
+            if int(quote.get("x402Version", 0)) != int(resource.get("x402_version", 2)):
+                raise ValueError("merchant quote has an unsupported x402 version")
+            quote_resource = quote.get("resource") or {}
+            if not isinstance(quote_resource, dict) or str(quote_resource.get("url") or "") != expected_url:
+                raise ValueError("merchant quote resource URL does not match the approved resource")
+            accepts = quote.get("accepts")
+            if not isinstance(accepts, list) or not any(
+                isinstance(option, dict) and all(
+                    str(option.get(key, "")) == str(expected.get(key, ""))
+                    for key in ("scheme", "network", "asset", "amount", "payTo")
+                ) for option in accepts
+            ):
+                raise ValueError(f"merchant quote does not match Pactrail policy for {resource_id}")
+            return quote
+
+        def _send_standard_merchant_response(self, status: int, headers: dict[str, str], body: bytes, *,
+                                             request_id: str = "") -> None:
+            """Return the merchant's x402 response without granting it Gateway-origin powers."""
+            self.send_response(status)
+            for header in ("content-type", "cache-control", "payment-required", "payment-response"):
+                value = self._header(headers, header)
+                if value:
+                    self.send_header(header, value)
+            if request_id:
+                self.send_header("x-pactrail-request-id", request_id)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _handle_standard_x402(self, policy: dict, resource_id: str, resource: dict) -> bool:
+            """Proxy the standard x402 server handshake; Pactrail never settles for the merchant."""
+            body = self._read_raw(policy)
+            guard_payload = self._x402_guard_payload(resource_id, resource)
+            approval_id = self.headers.get("x-pactrail-signer-approval", "").strip()
+            signer_approval = None
+            session_cap = None
+            if approval_id:
+                signer_id = self._signer_identity(policy)
+                if not signer_id:
+                    self._send(401, {"error": "invalid_wallet_adapter"})
+                    return True
+                with SpendStore(str(db_path)) as store:
+                    signer_approval = store.consume_signer_approval(approval_id, signer_id=signer_id)
+                    intent = store.payment_intent(str(signer_approval["request_id"])) if signer_approval else None
+                    session = store.spend_session(str(intent["session_id"])) if intent else None
+                if signer_approval is None or intent is None or session is None or session["status"] != "active":
+                    self._send(403, {"error": "signer_approval_denied"})
+                    return True
+                if intent["resource_id"] != resource_id or signer_approval["body_hash"] != hashlib.sha256(body).hexdigest():
+                    self._send(403, {"error": "signer_approval_binding_mismatch"})
+                    return True
+                for header, expected in (("x-agent-id", intent["agent_id"]), ("x-budget-id", intent["budget_id"]),
+                                         ("x-session-id", intent["session_id"]), ("x-request-id", intent["request_id"])):
+                    supplied = self.headers.get(header, "")
+                    if supplied and supplied != expected:
+                        self._send(403, {"error": "signer_approval_binding_mismatch", "detail": f"{header} does not match approval"})
+                        return True
+                guard_payload.update({"agent": intent["agent_id"], "budget": intent["budget_id"], "session": intent["session_id"]})
+                session_cap = float(session["cap"])
+            else:
+                try:
+                    claims = self._capability_claims(policy)
+                except CapabilityError as exc:
+                    self._send(401, {"error": "invalid_payment_capability", "detail": str(exc)})
+                    return True
+                capability_error = self._claim_allows(
+                    claims, resource_id, resource, agent=str(guard_payload["agent"]), budget=str(guard_payload["budget"]),
+                )
+                if capability_error:
+                    self._send(403, {"error": "payment_capability_denied", "detail": capability_error})
+                    return True
+                guard_payload["session"] = str(claims["session_id"])
+                with SpendStore(str(db_path)) as store:
+                    session = store.spend_session(str(claims["session_id"]))
+                session_cap = float(session["cap"]) if session is not None else None
+
+            if inspect_content(body, policy):
+                self._send(403, {"error": "x402_content_denied"})
+                return True
+            payment_header = self.headers.get("payment-signature", "")
+            if not payment_header:
+                with SpendStore(str(db_path)) as store:
+                    decision = decide(store, policy, self._guard_request(guard_payload)).as_dict()
+                if not decision["allowed"]:
+                    self._send(403, decision)
+                    return True
+                status, headers, response_body = self._merchant_x402_request(resource, include_payment=False)
+                required = self._header(headers, "payment-required")
+                if status != 402 or not required:
+                    self._send(502, {"error": "merchant_did_not_return_standard_x402_quote"})
+                    return True
+                try:
+                    self._validate_merchant_quote(resource_id, resource, required)
+                except ValueError as exc:
+                    self._send(502, {"error": "merchant_quote_rejected", "detail": str(exc)})
+                    return True
+                self._send_standard_merchant_response(status, headers, response_body)
+                return True
+
+            if policy.get("require_signer_approval") and signer_approval is None:
+                self._send(403, {"error": "signer_approval_required"})
+                return True
+            requirements = _x402_payment_requirements(resource)
+            payment_payload = _decode_x402_header(payment_header)
+            binding_errors = _x402_payment_binding_errors(payment_payload, requirements, resource)
+            if binding_errors:
+                self._send(403, {"error": "payment_binding_mismatch", "detail": "; ".join(binding_errors)})
+                return True
+            request_id = _request_id(self.headers.get("x-request-id"))
+            with SpendStore(str(db_path)) as store:
+                decision = _decide_and_record(
+                    store, policy, self._guard_request(guard_payload), request_id=request_id,
+                    route_type="x402", route_id=resource_id, session_cap=session_cap,
+                )
+                if not decision["allowed"]:
+                    self._send(403, decision)
+                    return True
+                fingerprint = hashlib.sha256(json.dumps(payment_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                previous = store.claim_x402_payment(
+                    request_id, resource_id, fingerprint, scheme=str(requirements["scheme"]),
+                    authorization_limit_units=str(requirements["amount"]),
+                )
+                if previous:
+                    store.release_reservation(request_id)
+                    self._send(409, {"error": "replayed_x402_payment", "previous_request_id": previous})
+                    return True
+                store.update_x402_payment(request_id, "submitted_to_merchant")
+            status, headers, response_body = self._merchant_x402_request(resource, include_payment=True)
+            receipt_header = self._header(headers, "payment-response")
+            if not 200 <= status < 300 or not receipt_header:
+                with SpendStore(str(db_path)) as store:
+                    store.update_x402_payment(request_id, "merchant_delivery_unverified", detail=f"merchant HTTP {status}")
+                self._send(502, {"error": "merchant_did_not_confirm_standard_settlement", "request_id": request_id})
+                return True
+            try:
+                receipt = _decode_x402_header(receipt_header)
+                settled_units = _x402_settlement_units(receipt, str(requirements["amount"]), str(requirements["scheme"]))
+                with SpendStore(str(db_path)) as store:
+                    store.account_x402_payment(request_id, usage_units=settled_units, settled_units=settled_units)
+                    record_x402_settlement(store, guard_payload, request_id, requirements, {}, receipt)
+                    store.update_x402_payment(request_id, "delivered", transaction_ref=str(receipt.get("transaction") or receipt.get("txHash") or ""))
+                    if store.payment_intent(request_id):
+                        store.update_payment_intent(request_id, "delivered")
+                    if signer_approval is not None:
+                        store.update_signer_approval(str(signer_approval["approval_id"]), "delivered")
+            except ValueError as exc:
+                with SpendStore(str(db_path)) as store:
+                    store.update_x402_payment(request_id, "merchant_receipt_invalid", detail=str(exc))
+                self._send(502, {"error": "invalid_merchant_payment_response", "request_id": request_id})
+                return True
+            self._send_standard_merchant_response(status, headers, response_body, request_id=request_id)
+            return True
+
         def _handle_x402(self, policy: dict) -> bool:
             route = self._x402_route(policy)
             if not route:
                 return False
             resource_id, resource = route
+            if resource.get("x402_execution", "merchant") == "merchant":
+                return self._handle_standard_x402(policy, resource_id, resource)
             body = self._read_raw(policy)
             guard_payload = self._x402_guard_payload(resource_id, resource)
             claims = None

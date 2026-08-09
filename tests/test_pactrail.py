@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -8,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from pactrail_core.__main__ import make_gateway_server
@@ -39,7 +41,7 @@ class PactrailTest(unittest.TestCase):
                 "x402_resources": {"research": {
                     "url": "http://127.0.0.1:9/unreachable", "amount": 0.1,
                     "asset": "0xUSDC", "pay_to": "0xmerchant", "network": "eip155:84532",
-                    "facilitator_url": "http://127.0.0.1:9",
+                    "facilitator_url": "http://127.0.0.1:9", "x402_execution": "gateway-legacy",
                 }},
             }))
             server = make_gateway_server(root / "spend.db", policy, port=0)
@@ -134,7 +136,7 @@ class PactrailTest(unittest.TestCase):
                     "url": f"http://127.0.0.1:{sandbox.server_port}/paid/search",
                     "resource_url": "https://gateway.example/x402/research", "method": "POST", "amount": 0.1,
                     "asset": "0xUSDC", "pay_to": "0xmerchant", "network": "eip155:84532",
-                    "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}",
+                    "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}", "x402_execution": "gateway-legacy",
                 }},
             }))
             server = make_gateway_server(root / "spend.db", policy, port=0)
@@ -169,6 +171,97 @@ class PactrailTest(unittest.TestCase):
             self.assertEqual(receipt["budget_id"], "team")
             self.assertEqual(receipt["intent_status"], "delivered")
 
+    def test_standard_x402_merchant_owns_quote_settlement_and_delivery(self) -> None:
+        """Pactrail must relay the standard merchant handshake, never settle first."""
+        old_secret = os.environ.get("PACTRAIL_CAPABILITY_SECRET")
+        os.environ["PACTRAIL_CAPABILITY_SECRET"] = "test-capability-secret"
+        self.addCleanup(lambda: os.environ.__setitem__("PACTRAIL_CAPABILITY_SECRET", old_secret)
+                        if old_secret is not None else os.environ.pop("PACTRAIL_CAPABILITY_SECRET", None))
+
+        class Merchant(BaseHTTPRequestHandler):
+            seen_payment_signature = False
+
+            def log_message(self, fmt, *args):
+                return
+
+            def _reply(self, status: int, body: dict, headers: dict[str, str] | None = None) -> None:
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self) -> None:
+                resource_url = f"http://{self.headers['host']}{self.path}"
+                if not self.headers.get("payment-signature"):
+                    quote = {
+                        "x402Version": 2,
+                        "resource": {"url": resource_url, "description": "merchant search", "mimeType": "application/json"},
+                        "accepts": [{
+                            "scheme": "exact", "network": "eip155:84532", "asset": "0xUSDC",
+                            "amount": "100000", "payTo": "0xmerchant",
+                            "maxTimeoutSeconds": 60, "extra": {"name": "USDC", "version": "2"},
+                        }],
+                    }
+                    encoded = base64.b64encode(json.dumps(quote, separators=(",", ":")).encode()).decode()
+                    self._reply(402, {"error": "payment_required"}, {"payment-required": encoded})
+                    return
+                Merchant.seen_payment_signature = True
+                receipt = {"success": True, "transaction": "merchant:standard-test", "network": "eip155:84532",
+                           "amount": "100000", "extra": {"chargedAmount": "100000"}}
+                encoded = base64.b64encode(json.dumps(receipt, separators=(",", ":")).encode()).decode()
+                self._reply(200, {"ok": True, "source": "standard-merchant"}, {"payment-response": encoded})
+
+        merchant = ThreadingHTTPServer(("127.0.0.1", 0), Merchant)
+        merchant_thread = threading.Thread(target=merchant.serve_forever, daemon=True)
+        merchant_thread.start()
+        self.addCleanup(lambda: (merchant.shutdown(), merchant_thread.join(1), merchant.server_close()))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            merchant_url = f"http://127.0.0.1:{merchant.server_port}/paid/search"
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({
+                "gateway_tokens": ["admin-token"], "budgets": {"team": 1.0},
+                "x402_resources": {"research": {
+                    "url": merchant_url, "method": "POST", "amount": 0.1, "amount_units": "100000",
+                    "asset": "0xUSDC", "pay_to": "0xmerchant", "network": "eip155:84532",
+                    "description": "merchant search",
+                    "x402_execution": "merchant",
+                }},
+            }))
+            server = make_gateway_server(root / "spend.db", policy, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), thread.join(1), server.server_close()))
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            def admin(path: str, body: dict) -> dict:
+                req = urllib.request.Request(base + path, data=json.dumps(body).encode(), method="POST", headers={
+                    "content-type": "application/json", "authorization": "Bearer admin-token",
+                })
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    return json.load(response)
+
+            session = admin("/sessions", {"parent_task": "standard", "budget_id": "team", "cap": 0.25})
+            minted = admin("/capabilities", {"session_id": session["session_id"], "agent_id": "research-bot",
+                                               "resource_ids": ["research"]})
+            client = PactrailClient(base, minted["capability"], "research-bot", "team", session["session_id"])
+            intent = client.create_payment_intent("research")
+
+            def signer(quote: dict) -> str:
+                return json.dumps({"x402Version": 2, "accepted": quote["accepts"][0],
+                                   "payload": {"authorization": "standard"}, "resource": quote["resource"]})
+
+            result, receipt = client.pay_x402(intent, b'{"query":"standard"}', signer)
+            self.assertTrue(result["ok"])
+            self.assertTrue(Merchant.seen_payment_signature)
+            self.assertEqual(receipt["status"], "delivered")
+            self.assertEqual(receipt["transaction_ref"], "merchant:standard-test")
+            self.assertEqual(receipt["intent_status"], "delivered")
+
     def test_production_signer_adapter_only_signs_gateway_claimed_approval(self) -> None:
         old_capability = os.environ.get("PACTRAIL_CAPABILITY_SECRET")
         old_signer = os.environ.get("PACTRAIL_TEST_SIGNER_TOKEN")
@@ -193,7 +286,7 @@ class PactrailTest(unittest.TestCase):
                     "url": f"http://127.0.0.1:{sandbox.server_port}/paid/search",
                     "resource_url": "https://gateway.example/x402/research", "method": "POST", "amount": 0.1,
                     "asset": "0xUSDC", "pay_to": "0xmerchant", "network": "eip155:84532",
-                    "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}",
+                    "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}", "x402_execution": "gateway-legacy",
                 }},
             }))
             server = make_gateway_server(root / "spend.db", policy, port=0)
@@ -261,7 +354,7 @@ class PactrailTest(unittest.TestCase):
                     "url": f"http://127.0.0.1:{sandbox.server_port}/paid/search",
                     "resource_url": f"https://gateway.example/x402/{scheme}", "method": "POST", "amount": 0.1,
                     "asset": "0xUSDC", "pay_to": "0xmerchant", "network": "eip155:84532",
-                    "scheme": scheme, "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}",
+                    "scheme": scheme, "facilitator_url": f"http://127.0.0.1:{sandbox.server_port}", "x402_execution": "gateway-legacy",
                 }
                 if scheme in {"upto", "batch-settlement"}:
                     value["payment_policy"] = {"scheme": scheme, "authorization_limit_units": "100000"}

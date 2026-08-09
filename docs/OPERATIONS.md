@@ -89,14 +89,21 @@ The gateway checks policy and ledger history only. It is the enforcement point
 when your agent, LLM proxy, or x402 middleware honors the decision.
 It does not return prompts, rewrite prompts, or inject model instructions.
 
-For x402 seller-side middleware, configure `x402_resources` in the policy and
-serve clients from `/x402/<resource-id>`. A request without payment gets HTTP 402
-with `PAYMENT-REQUIRED`; an x402-capable client retries with `PAYMENT-SIGNATURE`
-or legacy `X-PAYMENT`. The gateway then reserves budget, calls the configured
-facilitator `/verify` and `/settle` endpoints, forwards to the protected upstream
-only after settlement, returns `PAYMENT-RESPONSE`, records the settlement on
-`api_x402`, and releases the reservation. Keep facilitator credentials in
-`facilitator_auth_env`, not in the policy file.
+For standard x402 merchant resources, configure `x402_resources` in the policy
+and serve clients from `/x402/<resource-id>`. Pactrail proxies the normal HTTP
+handshake: it relays the merchant's `402` and `PAYMENT-REQUIRED` quote only when
+the quote matches the approved merchant, network, asset, recipient, amount and
+scheme. On retry it verifies the same bindings, reserves budget, and relays the
+original `PAYMENT-SIGNATURE` to the merchant. The merchant remains the standard
+x402 resource server: it verifies, performs the work, settles through its
+facilitator, and returns `PAYMENT-RESPONSE`. Pactrail does not need the
+merchant's facilitator credential. It records that receipt and
+releases the reservation only after the merchant confirms settlement.
+
+`x402_execution: "merchant"` is the default and is the only allowed mode in a
+production policy. `x402_execution: "gateway-legacy"` exists solely for the
+local sandbox and older tests; it makes Pactrail call a facilitator itself and
+must not be used for a real external merchant.
 
 For provider-compatible SDKs, keep the real provider key in the gateway process
 and give agents only a gateway token:

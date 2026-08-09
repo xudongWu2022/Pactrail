@@ -29,6 +29,7 @@
       "pay_to": "0x000000000000000000000000000000000000dEaD",
       "network": "eip155:84532",
       "scheme": "exact",
+      "x402_execution": "gateway-legacy",
       "payment_policy": {
         "scheme": "exact"
       },

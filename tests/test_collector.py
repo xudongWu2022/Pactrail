@@ -727,6 +727,7 @@ class CollectorTest(unittest.TestCase):
                             "service": "/scrape",
                             "budget": "team-research",
                             "facilitator_url": "http://127.0.0.1:9",
+                            "x402_execution": "gateway-legacy",
                         },
                     },
                 }, f)
@@ -840,6 +841,7 @@ class CollectorTest(unittest.TestCase):
                             "service": "/paid",
                             "budget": "team-research",
                             "facilitator_url": f"http://127.0.0.1:{facilitator.server_port}",
+                            "x402_execution": "gateway-legacy",
                         },
                     },
                 }, f)

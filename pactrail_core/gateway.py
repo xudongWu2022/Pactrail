@@ -302,7 +302,7 @@ def validate_policy(policy: dict) -> list[str]:
         "pay_to", "network", "scheme", "max_timeout_seconds", "description",
         "mime_type", "budget", "merchant", "service", "facilitator_url",
         "facilitator_auth_env", "facilitator_mode", "facilitator_cdp_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
-        "payment_policy",
+        "payment_policy", "x402_execution",
     }
     signer_adapter_keys = {"auth_env"}
 
@@ -419,11 +419,15 @@ def validate_policy(policy: dict) -> list[str]:
         for key in resource:
             if key not in x402_resource_keys:
                 errors.append(f"unknown x402 resource key for {name}: {key}")
-        for required in ("url", "amount", "pay_to", "asset", "facilitator_url"):
+        for required in ("url", "amount", "pay_to", "asset"):
             if required not in resource:
                 errors.append(f"x402 resource {name} missing {required}")
+        if resource.get("x402_execution", "merchant") == "gateway-legacy" and "facilitator_url" not in resource:
+            errors.append(f"gateway-legacy x402 resource {name} missing facilitator_url")
         if resource.get("facilitator_mode", "http") not in {"http", "cdp-cli"}:
             errors.append(f"x402 resource {name} has unsupported facilitator_mode")
+        if resource.get("x402_execution", "merchant") not in {"merchant", "gateway-legacy"}:
+            errors.append(f"x402 resource {name} has unsupported x402_execution")
         payment_policy = resource.get("payment_policy")
         if payment_policy is not None:
             if not isinstance(payment_policy, dict):
@@ -471,11 +475,14 @@ def validate_policy(policy: dict) -> list[str]:
         if not policy.get("signer_adapters"):
             errors.append("production requires at least one wallet signer adapter")
         for name, resource in policy.get("x402_resources", {}).items():
-            for key in ("url", "facilitator_url"):
+            required_urls = ("url",) if resource.get("x402_execution", "merchant") == "merchant" else ("url", "facilitator_url")
+            for key in required_urls:
                 value = resource.get(key)
                 parsed = urlsplit(str(value or ""))
                 if parsed.scheme != "https" or not parsed.netloc:
                     errors.append(f"production x402 resource {name} {key} must be an https URL")
+            if resource.get("x402_execution", "merchant") == "gateway-legacy":
+                errors.append(f"production x402 resource {name} cannot use gateway-legacy settlement")
 
     return errors
 
