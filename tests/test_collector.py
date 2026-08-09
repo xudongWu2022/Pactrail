@@ -19,7 +19,7 @@ from unittest.mock import patch
 from pactrail_core.__main__ import (
     _alert_payload, _alert_platform, _alert_row, _format_alert, _is_event_stream,
     _load_budgets, _run_summary, _triage_alerts, _usage_body_from_sse, _with_stream_usage,
-    _x402_settlement_units, main, make_gateway_server,
+    _seed_control_plane_showcase, _x402_settlement_units, main, make_gateway_server,
 )
 from pactrail_core.adapters import (
     _price, _tokencost_price, from_llm_usage, from_stripe_events,
@@ -384,6 +384,18 @@ class CollectorTest(unittest.TestCase):
         self.assertIn("Evidence", html)
         self.assertIn("new merchant provider", html)
 
+    def test_live_showcase_seeds_control_plane_story(self) -> None:
+        store = SpendStore()
+        self.addCleanup(store.close)
+        _seed_control_plane_showcase(store)
+
+        html = render(store, {}, [])
+        self.assertIn("market-research-search", html)
+        self.assertIn("facilitator:demo-settlement-7f2c", html)
+        self.assertIn("unreviewed-bulk-export", html)
+        self.assertIn("unknown-payto is not approved", html)
+        self.assertIn("signer approval pending", html)
+
     def test_cli_demo_writes_artifacts_to_out_dir(self) -> None:
         with tempfile.TemporaryDirectory() as out_dir:
             db_path = Path(out_dir) / "demo.db"
@@ -393,6 +405,15 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue((Path(out_dir) / "alerts.json").exists())
             self.assertTrue((Path(out_dir) / "run-summary.json").exists())
             self.assertTrue(db_path.exists())
+
+    def test_cli_showcase_includes_control_plane_story(self) -> None:
+        with tempfile.TemporaryDirectory() as out_dir:
+            db_path = Path(out_dir) / "showcase.db"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["showcase", "--db", str(db_path), "--out-dir", out_dir])
+            html = (Path(out_dir) / "report.html").read_text(encoding="utf-8")
+            self.assertIn("market-research-search", html)
+            self.assertIn("unreviewed-bulk-export", html)
 
     def test_cli_report_requires_existing_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

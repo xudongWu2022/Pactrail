@@ -1,4 +1,4 @@
-"""CLI for the read-only cross-rail agent spend collector."""
+"""Pactrail gateway, control-plane demo, and observability CLI."""
 from __future__ import annotations
 
 import argparse
@@ -581,12 +581,117 @@ def demo(out_dir: str | Path = ".", db_path: str | Path = "spend.db") -> None:
     print("[self-check] Stripe payment mapping -- OK")
 
 
+def _seed_control_plane_showcase(store: SpendStore) -> None:
+    """Create stable, fictional control-plane records for the live product demo.
+
+    These rows are intentionally ledger-only: they explain the product without
+    pretending a testnet payment occurred. Real receipts are still created by
+    the gateway/facilitator path.
+    """
+    existing = store.db.execute(
+        "SELECT 1 FROM payment_intents WHERE request_id = 'showcase:paid-search'"
+    ).fetchone()
+    if existing:
+        return
+
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    constraints = {
+        "resource_ids": ["market-research-search", "financial-data-snapshot"],
+        "merchants": ["atlas-research"],
+        "networks": ["eip155:84532"],
+        "assets": ["USDC"],
+        "schemes": ["exact", "upto"],
+    }
+    paid_session = store.create_spend_session(
+        parent_task="Prepare competitor research brief", budget_id="team-research",
+        cap=2.00, expires_at=expiry, constraints=constraints,
+    )
+    pending_session = store.create_spend_session(
+        parent_task="Refresh market data snapshot", budget_id="team-research",
+        cap=1.00, expires_at=expiry, constraints=constraints,
+    )
+
+    paid_request = "showcase:paid-search"
+    paid_guard = GuardRequest(
+        x_agent_id="research-bot", rail="api_x402", amount=0.10,
+        x_budget_id="team-research", provider_name="x402", service_name="/search",
+        x_merchant_id="atlas-research", x_session_id=str(paid_session["session_id"]),
+    )
+    store.record_gateway_decision(
+        request_id=paid_request, req=paid_guard, decision="allow",
+        reasons=["budget remaining 1.90", "merchant atlas-research is approved", "Base Sepolia USDC allowed"],
+        route_type="x402", route_id="market-research-search",
+    )
+    store.create_payment_intent(
+        request_id=paid_request, session_id=str(paid_session["session_id"]),
+        resource_id="market-research-search", agent_id="research-bot", budget_id="team-research",
+    )
+    approval = store.create_signer_approval(
+        request_id=paid_request, signer_id="wallet-ui", quote_hash="a" * 64, body_hash="b" * 64,
+        requirements={"scheme": "exact", "network": "eip155:84532", "asset": "USDC"}, expires_at=expiry,
+    )
+    store.claim_x402_payment(
+        paid_request, "market-research-search", "showcase-payment-fingerprint-paid",
+        scheme="exact", authorization_limit_units="100000",
+    )
+    store.account_x402_payment(paid_request, usage_units="75000", settled_units="75000")
+    store.update_x402_payment(paid_request, "delivered", transaction_ref="facilitator:demo-settlement-7f2c")
+    store.update_payment_intent(paid_request, "delivered")
+    store.update_signer_approval(str(approval["approval_id"]), "delivered")
+
+    pending_request = "showcase:pending-snapshot"
+    pending_guard = GuardRequest(
+        x_agent_id="research-bot", rail="api_x402", amount=0.30,
+        x_budget_id="team-research", provider_name="x402", service_name="/snapshot",
+        x_merchant_id="atlas-research", x_session_id=str(pending_session["session_id"]),
+    )
+    store.record_gateway_decision(
+        request_id=pending_request, req=pending_guard, decision="allow",
+        reasons=["budget reserved before signing", "merchant atlas-research is approved"],
+        route_type="x402", route_id="financial-data-snapshot",
+    )
+    store.create_payment_intent(
+        request_id=pending_request, session_id=str(pending_session["session_id"]),
+        resource_id="financial-data-snapshot", agent_id="research-bot", budget_id="team-research",
+    )
+    store.create_signer_approval(
+        request_id=pending_request, signer_id="wallet-ui", quote_hash="c" * 64, body_hash="d" * 64,
+        requirements={"scheme": "upto", "network": "eip155:84532", "asset": "USDC"}, expires_at=expiry,
+    )
+    store.update_payment_intent(pending_request, "signer_approval_pending")
+
+    blocked_guard = GuardRequest(
+        x_agent_id="research-bot", rail="api_x402", amount=4.50,
+        x_budget_id="team-research", provider_name="x402", service_name="/bulk-export",
+        x_merchant_id="unknown-payto", x_session_id=str(pending_session["session_id"]),
+    )
+    store.record_gateway_decision(
+        request_id="showcase:blocked-export", req=blocked_guard, decision="deny",
+        reasons=["merchant unknown-payto is not approved", "amount 4.50 exceeds agent cap 1.00"],
+        route_type="x402", route_id="unreviewed-bulk-export",
+    )
+
+
+def showcase(out_dir: str | Path = "artifacts-showcase", db_path: str | Path = "pactrail-showcase.db") -> None:
+    """Generate a static, safe-to-share product showcase without a wallet or API key."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    demo(out_dir, db_path)
+    budgets = _load_budgets(_load_fixture("budgets.json"))
+    with SpendStore(db_path) as store:
+        _seed_control_plane_showcase(store)
+        report_path = Path(out_dir) / "report.html"
+        report_path.write_text(render(store, budgets, run_all(store, budgets)), encoding="utf-8")
+    print(f"[showcase] control-plane story written to {report_path}")
+
+
 def demo_live(out_dir: str | Path = "artifacts-live", db_path: str | Path = "spend-demo.db",
               policy_path: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
     """Seed the fixture ledger, then serve its auto-refreshing dashboard."""
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     demo(out_path, db_path)
+    with SpendStore(db_path) as store:
+        _seed_control_plane_showcase(store)
     print(f"\nLive demo dashboard: http://{host}:{port}/dashboard")
     gateway(db_path, policy_path, host, port)
 
@@ -2304,7 +2409,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Pactrail Gateway and spend observability CLI.",
         epilog=(
             "Command families:\n"
-            "  Start and test: demo, demo-live, gateway, x402-sandbox, run-scenarios\n"
+            "  Start and test: showcase, demo, demo-live, gateway, x402-sandbox, run-scenarios\n"
             "  Control and policy: guard, validate-policy, audit-config, freeze, unfreeze\n"
             "  x402 discovery: check-facilitator, fetch-bazaar, filter-bazaar, adopt-bazaar\n"
             "  Observability: pull*, report, simulate-spend\n"
@@ -2320,6 +2425,11 @@ def _parser() -> argparse.ArgumentParser:
 
     demo_p = sub.add_parser("demo", parents=[common], help="run the fixture-backed product demo")
     demo_p.add_argument("--db", default="spend.db", help="SQLite ledger path")
+
+    showcase_p = sub.add_parser("showcase", parents=[common],
+                                help="write a safe, static Pactrail product showcase")
+    showcase_p.add_argument("--db", default="pactrail-showcase.db", help="SQLite ledger path")
+    showcase_p.set_defaults(out_dir="artifacts-showcase")
 
     demo_live_p = sub.add_parser("demo-live", parents=[common],
                                  help="seed fixture data and serve the live dashboard")
@@ -2490,6 +2600,8 @@ def main(argv: list[str] | None = None) -> None:
     cmd = args.cmd or "demo"
     if cmd == "demo":
         demo(args.out_dir, args.db)
+    elif cmd == "showcase":
+        showcase(args.out_dir, args.db)
     elif cmd == "demo-live":
         demo_live(args.out_dir, args.db, args.policy, args.host, args.port)
     elif cmd == "pull":

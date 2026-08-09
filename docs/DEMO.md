@@ -3,7 +3,15 @@
 This is a reproducible walkthrough for a short product video. It uses only fixture
 data, so it does not expose provider keys, wallet keys, prompts, or real spend.
 
-1. Start the live experience (0:00-0:30).
+1. Generate the safe static showcase (0:00-0:10), then start the live experience (0:10-0:30).
+
+   ```bash
+   python3 -m pactrail showcase
+   ```
+
+   Open `artifacts-showcase/report.html`. It contains clearly fictional,
+   auditable examples of a completed payment, a signer approval waiting, and a
+   policy denial. It never spends testnet or mainnet funds.
 
    ```bash
    python3 -m pactrail demo-live --policy gateway.example.json

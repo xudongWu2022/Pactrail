@@ -42,7 +42,7 @@ navigation use these families:
 
 | Family | Commands |
 | --- | --- |
-| Start and test | `demo`, `demo-live`, `gateway`, `x402-sandbox`, `run-scenarios` |
+| Start and test | `showcase`, `demo`, `demo-live`, `gateway`, `x402-sandbox`, `run-scenarios` |
 | Control and policy | `guard`, `validate-policy`, `audit-config`, `freeze`, `unfreeze`, `release-reservation` |
 | x402 discovery | `check-facilitator`, `fetch-bazaar`, `filter-bazaar`, `adopt-bazaar` |
 | Observability | `pull*`, `report`, `simulate-spend` |
