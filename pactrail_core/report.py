@@ -32,7 +32,7 @@ h2{margin:0 0 12px;font-size:15px;font-weight:720}
 .eyebrow{color:var(--green);font-weight:760;font-size:11px;letter-spacing:.12em;text-transform:uppercase;margin:0 0 7px}
 .tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:0 0 18px}.tab{appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font:inherit;font-weight:700;padding:10px 2px;cursor:pointer;margin-right:18px}.tab.active{color:var(--green);border-bottom-color:var(--green)}
 .view[hidden]{display:none}.section-intro{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:0 0 14px}.section-intro h2{font-size:18px;margin:0}.section-intro .meta{max-width:620px}
-.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:18px}.flow-step{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:13px;min-height:78px}.flow-step:not(:last-child):after{content:'→';position:absolute;right:-9px;top:26px;color:var(--muted);font-size:17px;z-index:1}.flow-step .label{margin-bottom:7px}.flow-step .value{font-size:17px;margin:0}.flow-step .meta{margin-top:4px}
+.hero{background:#073b38;color:#fff;border-radius:12px;padding:26px 28px;margin-bottom:14px}.hero .eyebrow{color:#9ee7d9}.hero h2{font-size:25px;margin:0 0 8px}.hero .meta{color:#c8e5df;max-width:650px}.hero strong{color:#fff}.summary{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:18px}.summary .metric{min-height:78px}.summary .value{font-size:24px}.activity{margin-bottom:18px}.activity-item{display:grid;grid-template-columns:11px minmax(0,1fr) auto;gap:11px;align-items:start;padding:13px 0;border-top:1px solid #edf0f5}.activity-item:first-of-type{border-top:0}.marker{width:9px;height:9px;border-radius:50%;margin-top:6px;background:var(--green)}.marker.wait{background:var(--amber)}.marker.block{background:var(--red)}details{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:0 16px;margin-top:18px}summary{cursor:pointer;font-weight:720;padding:14px 0}details[open] summary{border-bottom:1px solid var(--line);margin-bottom:16px}.detail-stack{padding-bottom:16px}.detail-stack > *{margin-bottom:16px}.detail-stack > *:last-child{margin-bottom:0}
 .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.status{font-weight:720;text-transform:capitalize}.status.settled,.status.delivered{color:var(--green)}.status.denied,.status.verification_failed,.status.settlement_failed,.status.delivery_failed{color:var(--red)}.status.pending,.status.signer_approval_pending{color:var(--amber)}
 .grid{display:grid;gap:14px}
 .metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}
@@ -66,7 +66,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .footer{color:var(--muted);font-size:12px;margin-top:18px}
 @media (max-width:860px){
   header{display:block}.badge{margin-top:12px}.metrics,.two{grid-template-columns:1fr}
-  .alert{grid-template-columns:1fr}.row{grid-template-columns:1fr}.money{text-align:left}.flow{grid-template-columns:1fr}.flow-step:not(:last-child):after{content:'↓';right:15px;top:auto;bottom:-16px}
+  .alert{grid-template-columns:1fr}.row{grid-template-columns:1fr}.money{text-align:left}.summary{grid-template-columns:1fr}
   th:nth-child(4),td:nth-child(4){display:none}
 }
 </style>
@@ -275,30 +275,60 @@ def _status(value: object) -> str:
 
 def _control_metrics(store: SpendStore) -> str:
     now = datetime.now(timezone.utc).isoformat()
-    active_sessions = store.db.execute(
-        "SELECT COUNT(*) FROM spend_sessions WHERE status = 'active' AND expires_at > ?", (now,)
-    ).fetchone()[0]
-    active_holds = store.db.execute(
-        "SELECT COUNT(*) FROM spend_reservations WHERE status = 'active' AND expires_at > ?", (now,)
-    ).fetchone()[0]
     pending_approvals = store.db.execute(
         "SELECT COUNT(*) FROM signer_approvals WHERE status = 'pending' AND expires_at > ?", (now,)
     ).fetchone()[0]
-    settled = store.db.execute(
+    delivered = store.db.execute(
         "SELECT COUNT(*) FROM x402_payments WHERE status IN ('settled', 'delivered')"
     ).fetchone()[0]
+    blocked = store.db.execute(
+        "SELECT COUNT(*) FROM gateway_decisions WHERE decision = 'deny'"
+    ).fetchone()[0]
     return (
-        "<section class='grid metrics'>"
-        f"<div class='metric'><div class='label'>Active spend sessions</div><div class='value'>{active_sessions}</div>"
-        "<div class='meta'>Task-scoped payment authority</div></div>"
-        f"<div class='metric'><div class='label'>Active budget holds</div><div class='value'>{active_holds}</div>"
-        "<div class='meta'>Reserved before settlement</div></div>"
-        f"<div class='metric'><div class='label'>Signer approvals</div><div class='value'>{pending_approvals}</div>"
-        "<div class='meta'>Pending one-time authorizations</div></div>"
-        f"<div class='metric'><div class='label'>x402 settled</div><div class='value'>{settled}</div>"
-        "<div class='meta'>Verified payment lifecycle records</div></div>"
+        "<section class='grid summary'>"
+        f"<div class='metric'><div class='label'>Delivered</div><div class='value'>{delivered}</div>"
+        "<div class='meta'>Payment reached the service</div></div>"
+        f"<div class='metric'><div class='label'>Waiting for wallet</div><div class='value'>{pending_approvals}</div>"
+        "<div class='meta'>One-time signer approvals</div></div>"
+        f"<div class='metric'><div class='label'>Blocked by Pactrail</div><div class='value'>{blocked}</div>"
+        "<div class='meta'>Stopped before any signature</div></div>"
         "</section>"
     )
+
+
+def _section_activity(store: SpendStore) -> str:
+    rows = store.db.execute(
+        "SELECT i.resource_id, i.agent_id, i.status AS intent_status, p.status AS payment_status, "
+        "a.status AS approval_status FROM payment_intents i "
+        "LEFT JOIN x402_payments p ON p.request_id = i.request_id "
+        "LEFT JOIN signer_approvals a ON a.request_id = i.request_id "
+        "ORDER BY i.updated_at DESC LIMIT 2"
+    ).fetchall()
+    denied = store.db.execute(
+        "SELECT route_id, reasons_json FROM gateway_decisions WHERE decision = 'deny' "
+        "ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    p = ["<section class='panel activity'><h2>What Pactrail did</h2>"
+         "<div class='meta'>A short, human-readable view of the latest payment decisions.</div>"]
+    for row in rows:
+        if row["payment_status"] in {"settled", "delivered"}:
+            title, marker, detail = "Payment delivered", "", "The merchant received a verified x402 payment and Pactrail stored the receipt."
+        else:
+            title, marker, detail = "Wallet approval needed", "wait", "The agent has authority to ask, but cannot sign or spend until the external wallet approves."
+        p.append(
+            f"<div class='activity-item'><span class='marker {marker}'></span><div><div class='name'>{escape(title)} · {escape(row['resource_id'])}</div>"
+            f"<div class='meta'>{escape(row['agent_id'])} — {escape(detail)}</div></div><div>{_status(row['payment_status'] or row['approval_status'] or row['intent_status'])}</div></div>"
+        )
+    if denied:
+        reasons = "; ".join(json.loads(denied["reasons_json"] or "[]"))
+        p.append(
+            f"<div class='activity-item'><span class='marker block'></span><div><div class='name'>Payment blocked · {escape(denied['route_id'])}</div>"
+            f"<div class='meta'>{escape(reasons)}</div></div><div>{_status('denied')}</div></div>"
+        )
+    if not rows and not denied:
+        p.append("<div class='meta' style='margin-top:12px'>No payment activity yet. Run the sandbox or create a payment intent.</div>")
+    p.append("</section>")
+    return "".join(p)
 
 
 def _section_payment_lifecycle(store: SpendStore) -> str:
@@ -422,19 +452,15 @@ def render(store: SpendStore, caps: dict[str, float], alerts: list[Alert],
              "<button class='tab active' type='button' data-view='control'>Control plane</button>"
              "<button class='tab' type='button' data-view='observability'>Spend observability</button></nav>")
     p.append("<main class='view' data-panel='control'>"
-             "<div class='section-intro'><div><h2>Payment authority and execution</h2>"
-             "<p class='meta'>The wallet key stays outside Pactrail. The gateway approves bounded intents, and an external signer can only sign a matching one-time approval.</p>"
-             "</div></div>")
-    p.append("<section class='flow' aria-label='Pactrail payment lifecycle'>"
-             "<div class='flow-step'><div class='label'>1. Agent</div><div class='value'>Payment intent</div><div class='meta'>resource + task</div></div>"
-             "<div class='flow-step'><div class='label'>2. Pactrail</div><div class='value'>Policy decision</div><div class='meta'>budget + merchant</div></div>"
-             "<div class='flow-step'><div class='label'>3. Signer</div><div class='value'>One-time approval</div><div class='meta'>no key to agent</div></div>"
-             "<div class='flow-step'><div class='label'>4. x402</div><div class='value'>Verify + settle</div><div class='meta'>facilitator</div></div>"
-             "<div class='flow-step'><div class='label'>5. Receipt</div><div class='value'>Audit record</div><div class='meta'>intent → settlement</div></div></section>")
+             "<section class='hero'><p class='eyebrow'>One sentence</p><h2>Your agent can ask to pay. It cannot spend without your rules.</h2>"
+             "<p class='meta'>Pactrail checks the merchant, budget, network and amount before the external wallet is ever asked to sign.</p></section>")
     p.append(_control_metrics(store))
+    p.append(_section_activity(store))
+    p.append("<details><summary>View technical payment records and policy log</summary><div class='detail-stack'>")
     p.append(_section_payment_lifecycle(store))
     p.append(_section_sessions_and_approvals(store))
     p.append(_section_gateway(store))
+    p.append("</div></details>")
     p.append("</main>")
     p.append("<main class='view' data-panel='observability' hidden>"
              "<div class='section-intro'><div><h2>Spend observability</h2>"
