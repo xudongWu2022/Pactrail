@@ -1165,7 +1165,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     "vary": "Origin",
                     "access-control-allow-headers": (
                         "authorization, content-type, x-request-id, payment-signature, x-payment, "
-                        "x-agent-id, x-budget-id, x-session-id, access-control-expose-headers"
+                        "x-agent-id, x-budget-id, x-session-id, x-pactrail-signer-approval, access-control-expose-headers"
                     ),
                     "access-control-allow-methods": "GET, POST, OPTIONS",
                     "access-control-expose-headers": (
@@ -1301,6 +1301,16 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 raise CapabilityError("payment capability session is inactive or expired")
             return claims
 
+        def _signer_identity(self, policy: dict) -> str | None:
+            """Authenticate a separate signer adapter; agents never receive this token."""
+            auth = self.headers.get("authorization", "")
+            token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+            for signer_id, config in (policy.get("signer_adapters") or {}).items():
+                expected = os.environ.get(str(config.get("auth_env", "")), "")
+                if expected and token and hmac.compare_digest(token, expected):
+                    return str(signer_id)
+            return None
+
         @staticmethod
         def _claim_allows(claims: dict, resource_id: str, resource: dict, *, agent: str, budget: str) -> str | None:
             if claims.get("agent_id") != agent or claims.get("budget_id") != budget:
@@ -1421,7 +1431,7 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     "host", "content-length", "connection", "authorization",
                     "payment-required", "payment-signature", "payment-response",
                     "x-payment", "x-payment-response", "x-agent-id", "x-budget-id",
-                    "x-session-id", "x-gateway-token",
+                    "x-session-id", "x-gateway-token", "x-pactrail-signer-approval",
                 }
             }
             passthrough.update({str(k): str(v) for k, v in merged_headers.items()})
@@ -1472,7 +1482,32 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             guard_payload = self._x402_guard_payload(resource_id, resource)
             claims = None
             session_cap = None
-            if self._capability_secret(policy):
+            approval_id = self.headers.get("x-pactrail-signer-approval", "").strip()
+            signer_approval = None
+            if approval_id:
+                signer_id = self._signer_identity(policy)
+                if not signer_id:
+                    self._send(401, {"error": "invalid_signer_adapter"})
+                    return True
+                with SpendStore(str(db_path)) as store:
+                    signer_approval = store.consume_signer_approval(approval_id, signer_id=signer_id)
+                    intent = store.payment_intent(str(signer_approval["request_id"])) if signer_approval else None
+                    session = store.spend_session(str(intent["session_id"])) if intent else None
+                if signer_approval is None or intent is None or session is None or session["status"] != "active":
+                    self._send(403, {"error": "signer_approval_denied"})
+                    return True
+                if intent["resource_id"] != resource_id or signer_approval["body_hash"] != hashlib.sha256(body).hexdigest():
+                    self._send(403, {"error": "signer_approval_binding_mismatch"})
+                    return True
+                for header, expected in (("x-agent-id", intent["agent_id"]), ("x-budget-id", intent["budget_id"]),
+                                         ("x-session-id", intent["session_id"]), ("x-request-id", intent["request_id"])):
+                    supplied = self.headers.get(header, "")
+                    if supplied and supplied != expected:
+                        self._send(403, {"error": "signer_approval_binding_mismatch", "detail": f"{header} does not match approval"})
+                        return True
+                guard_payload.update({"agent": intent["agent_id"], "budget": intent["budget_id"], "session": intent["session_id"]})
+                session_cap = float(session["cap"])
+            elif self._capability_secret(policy):
                 try:
                     claims = self._capability_claims(policy)
                 except CapabilityError as exc:
@@ -1524,6 +1559,9 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                     self._send(403, decision)
                 else:
                     self._send_x402_required(resource_id, resource, requirements)
+                return True
+            if policy.get("require_signer_approval") and signer_approval is None:
+                self._send(403, {"error": "signer_approval_required"})
                 return True
 
             request_id = _request_id(self.headers.get("x-request-id"))
@@ -1741,6 +1779,8 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 store.update_x402_payment(request_id, "delivered")
                 if store.payment_intent(request_id):
                     store.update_payment_intent(request_id, "delivered")
+                if signer_approval is not None:
+                    store.update_signer_approval(str(signer_approval["approval_id"]), "delivered")
             return True
 
         def _forward(self, target: dict, payload: dict,
@@ -1872,6 +1912,30 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
             if parsed.path == "/health":
                 self._send(200, {"ok": True})
                 return
+            if parsed.path.startswith("/signer-approvals/"):
+                policy = _load_policy(policy_path)
+                signer_id = self._signer_identity(policy)
+                approval_id = parsed.path.rsplit("/", 1)[-1]
+                if not signer_id:
+                    self._send(401, {"error": "invalid_signer_adapter"})
+                    return
+                with SpendStore(str(db_path)) as store:
+                    approval = store.signer_approval(approval_id)
+                    intent = store.payment_intent(str(approval["request_id"])) if approval else None
+                if approval is None or intent is None or approval["signer_id"] != signer_id or approval["status"] != "pending":
+                    self._send(404, {"error": "signer_approval_not_found"})
+                    return
+                if approval["expires_at"] <= datetime.now(timezone.utc).isoformat():
+                    self._send(410, {"error": "signer_approval_expired"})
+                    return
+                self._send(200, {
+                    "approval_id": approval["approval_id"], "request_id": approval["request_id"],
+                    "signer_id": approval["signer_id"], "resource_id": intent["resource_id"], "agent_id": intent["agent_id"],
+                    "budget_id": intent["budget_id"], "session_id": intent["session_id"],
+                    "body_sha256": approval["body_hash"], "quote_sha256": approval["quote_hash"],
+                    "requirements": json.loads(approval["requirements_json"]), "expires_at": approval["expires_at"],
+                })
+                return
             if parsed.path in ("/", "/dashboard"):
                 policy = _load_policy(policy_path)
                 token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
@@ -1945,6 +2009,53 @@ def make_gateway_server(db_path: str | Path = "spend.db", policy_path: str | Pat
                 if self._handle_x402(policy):
                     return
                 payload = self._read_json(policy)
+                if self.path.startswith("/payment-intents/") and self.path.endswith("/signer-approvals"):
+                    request_id = self.path.removeprefix("/payment-intents/").removesuffix("/signer-approvals").strip("/")
+                    try:
+                        claims = self._capability_claims(policy)
+                    except CapabilityError as exc:
+                        self._send(401, {"error": "invalid_payment_capability", "detail": str(exc)})
+                        return
+                    with SpendStore(str(db_path)) as store:
+                        intent = store.payment_intent(request_id)
+                    if intent is None or intent["session_id"] != claims.get("session_id") or intent["agent_id"] != claims.get("agent_id"):
+                        self._send(403, {"error": "payment_capability_denied"})
+                        return
+                    resource = policy.get("x402_resources", {}).get(intent["resource_id"])
+                    signer_id = str(payload.get("signer_id", ""))
+                    if not isinstance(resource, dict) or signer_id not in (policy.get("signer_adapters") or {}):
+                        self._send(404, {"error": "signer_or_resource_not_found"})
+                        return
+                    requirements = payload.get("requirements")
+                    expected = _x402_public_requirements(str(intent["resource_id"]), resource, _x402_payment_requirements(resource))
+                    if not isinstance(requirements, dict) or json.dumps(requirements, sort_keys=True, separators=(",", ":")) != json.dumps(expected, sort_keys=True, separators=(",", ":")):
+                        self._send(403, {"error": "signer_approval_quote_mismatch"})
+                        return
+                    body_hash = str(payload.get("body_sha256", ""))
+                    if len(body_hash) != 64 or any(char not in "0123456789abcdef" for char in body_hash.lower()):
+                        self._send(400, {"error": "invalid_body_sha256"})
+                        return
+                    ttl = min(max(int(payload.get("expires_in_seconds", 300)), 1), 900)
+                    with SpendStore(str(db_path)) as store:
+                        session = store.spend_session(str(intent["session_id"]))
+                        if session is None or session["status"] != "active":
+                            self._send(403, {"error": "spend_session_inactive"})
+                            return
+                        expires_at = min(datetime.now(timezone.utc) + timedelta(seconds=ttl),
+                                         datetime.fromisoformat(session["expires_at"]))
+                        try:
+                            approval = store.create_signer_approval(
+                                request_id=request_id, signer_id=signer_id,
+                                quote_hash=hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                                body_hash=body_hash, requirements=expected, expires_at=expires_at.isoformat(),
+                            )
+                        except Exception:
+                            self._send(409, {"error": "signer_approval_already_exists"})
+                            return
+                        store.update_payment_intent(request_id, "signer_approval_pending")
+                    self._send(201, {"approval_id": approval["approval_id"], "request_id": request_id,
+                                     "signer_id": signer_id, "expires_at": approval["expires_at"]})
+                    return
                 if self.path == "/payment-intents":
                     try:
                         claims = self._capability_claims(policy)

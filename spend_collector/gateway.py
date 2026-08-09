@@ -280,7 +280,7 @@ def validate_policy(policy: dict) -> list[str]:
         "max_amount_per_hour", "max_request_bytes", "warn_new_merchants",
         "deny_new_merchants", "agents", "merchants", "targets", "providers",
         "gateway_tokens", "reservation_ttl_seconds", "x402_resources",
-        "capability_secret_env",
+        "capability_secret_env", "signer_adapters", "require_signer_approval",
         "content_guard", "frozen_agents", "frozen_budgets", "block_on_anomaly",
         "block_on_anomaly_lookback_hours",
     }
@@ -303,6 +303,7 @@ def validate_policy(policy: dict) -> list[str]:
         "facilitator_auth_env", "facilitator_mode", "facilitator_cdp_env", "preflight_supported", "headers", "headers_env", "timeout", "agent",
         "payment_policy",
     }
+    signer_adapter_keys = {"auth_env"}
 
     if not isinstance(policy, dict):
         return ["policy must be a JSON object"]
@@ -319,8 +320,24 @@ def validate_policy(policy: dict) -> list[str]:
     if has_raw_api_key(policy):
         errors.append("policy must not contain raw api_key values; use api_key_env")
 
+    signer_adapters = policy.get("signer_adapters", {})
+    if not isinstance(signer_adapters, dict):
+        errors.append("signer_adapters must be an object")
+    else:
+        for signer_id, adapter in signer_adapters.items():
+            if not isinstance(adapter, dict):
+                errors.append(f"signer adapter {signer_id} must be an object")
+                continue
+            for key in adapter:
+                if key not in signer_adapter_keys:
+                    errors.append(f"unknown signer adapter key for {signer_id}: {key}")
+            if not isinstance(adapter.get("auth_env"), str) or not adapter.get("auth_env"):
+                errors.append(f"signer adapter {signer_id} missing auth_env")
+
     if "budgets" in policy and not isinstance(policy["budgets"], dict):
         errors.append("budgets must be an object")
+    if "require_signer_approval" in policy and not isinstance(policy["require_signer_approval"], bool):
+        errors.append("require_signer_approval must be a boolean")
     for key in ("reservation_ttl_seconds", "max_request_bytes"):
         if key in policy:
             try:
@@ -469,6 +486,9 @@ def audit_config(policy: dict, *, db_path: str = "spend.db", out_dir: str = "art
             env_vars.add(resource["facilitator_auth_env"])
         for value in resource.get("headers_env", {}).values():
             env_vars.add(value)
+    for adapter in policy.get("signer_adapters", {}).values():
+        if adapter.get("auth_env"):
+            env_vars.add(adapter["auth_env"])
     if policy.get("providers") or policy.get("targets"):
         env_vars.add("SPEND_GATEWAY_TOKEN")
     return {

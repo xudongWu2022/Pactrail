@@ -33,6 +33,7 @@ class SpendStore:
         self.db.execute(_X402_BATCHES_DDL)
         self.db.execute(_SPEND_SESSIONS_DDL)
         self.db.execute(_PAYMENT_INTENTS_DDL)
+        self.db.execute(_SIGNER_APPROVALS_DDL)
         self._migrate_columns()
 
     def _migrate_columns(self) -> None:
@@ -359,6 +360,45 @@ class SpendStore:
     def payment_intent(self, request_id: str):
         return self.db.execute("SELECT * FROM payment_intents WHERE request_id = ?", (request_id,)).fetchone()
 
+    def create_signer_approval(self, *, request_id: str, signer_id: str, quote_hash: str,
+                               body_hash: str, requirements: dict, expires_at: str) -> dict:
+        now = _now()
+        approval_id = f"sap:{uuid.uuid4().hex}"
+        self.db.execute(
+            "INSERT INTO signer_approvals (approval_id, request_id, signer_id, quote_hash, body_hash, "
+            "requirements_json, status, expires_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+            (approval_id, request_id, signer_id, quote_hash, body_hash,
+             json.dumps(requirements, sort_keys=True, separators=(",", ":")), expires_at, now, now),
+        )
+        self.db.commit()
+        return self.signer_approval(approval_id) or {}
+
+    def signer_approval(self, approval_id: str):
+        return self.db.execute("SELECT * FROM signer_approvals WHERE approval_id = ?", (approval_id,)).fetchone()
+
+    def consume_signer_approval(self, approval_id: str, *, signer_id: str, now: str | None = None):
+        """Atomically make one approved signer authorization executable once."""
+        now = now or _now()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.signer_approval(approval_id)
+            if row is None or row["signer_id"] != signer_id or row["status"] != "pending" or row["expires_at"] <= now:
+                self.db.rollback()
+                return None
+            self.db.execute("UPDATE signer_approvals SET status = 'executing', updated_at = ? WHERE approval_id = ?",
+                            (now, approval_id))
+            self.db.commit()
+            return self.signer_approval(approval_id)
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def update_signer_approval(self, approval_id: str, status: str) -> None:
+        self.db.execute("UPDATE signer_approvals SET status = ?, updated_at = ? WHERE approval_id = ?",
+                        (status, _now(), approval_id))
+        self.db.commit()
+
     def x402_payment(self, request_id: str):
         return self.db.execute("SELECT * FROM x402_payments WHERE request_id = ?", (request_id,)).fetchone()
 
@@ -528,4 +568,10 @@ _PAYMENT_INTENTS_DDL = (
     "CREATE TABLE IF NOT EXISTS payment_intents ("
     "request_id TEXT PRIMARY KEY, session_id TEXT, resource_id TEXT, agent_id TEXT, budget_id TEXT, "
     "status TEXT, created_at TEXT, updated_at TEXT)"
+)
+
+_SIGNER_APPROVALS_DDL = (
+    "CREATE TABLE IF NOT EXISTS signer_approvals ("
+    "approval_id TEXT PRIMARY KEY, request_id TEXT UNIQUE, signer_id TEXT, quote_hash TEXT, body_hash TEXT, "
+    "requirements_json TEXT, status TEXT, expires_at TEXT, created_at TEXT, updated_at TEXT)"
 )

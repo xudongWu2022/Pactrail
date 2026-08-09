@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,14 @@ from spend_collector.capabilities import PaymentIntent
 
 class PactrailError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SignerApprovalRequest:
+    approval_id: str
+    request_id: str
+    signer_id: str
+    expires_at: str
 
 
 @dataclass
@@ -40,6 +49,38 @@ class PactrailClient:
     def create_payment_intent(self, resource_id: str) -> PaymentIntent:
         _, raw = self._request("/payment-intents", body={"resource_id": resource_id})
         return PaymentIntent.from_dict(json.loads(raw))
+
+    def prepare_signer_approval(self, intent: PaymentIntent, payload: bytes, signer_id: str,
+                                *, protocol_headers: dict[str, str] | None = None) -> SignerApprovalRequest:
+        """Get the real 402 quote and bind it to a named external signer.
+
+        The Agent receives only an approval reference. It never receives the
+        wallet payment signature or the signer adapter credential.
+        """
+        protocol_headers = {str(key).lower(): str(value) for key, value in (protocol_headers or {}).items()}
+        protected = {"authorization", "content-type", "payment-signature", "x-payment", "x-agent-id", "x-budget-id", "x-session-id", "x-request-id", "x-pactrail-signer-approval"}
+        conflict = protected.intersection(protocol_headers)
+        if conflict:
+            raise PactrailError(f"protocol headers cannot override Pactrail bindings: {', '.join(sorted(conflict))}")
+        headers = {"content-type": "application/json", "x-agent-id": self.agent_id,
+                   "x-budget-id": self.budget_id, "x-session-id": self.session_id,
+                   "x-request-id": intent.request_id, **protocol_headers}
+        request = urllib.request.Request(self.gateway_url.rstrip("/") + f"/x402/{intent.resource_id}", data=payload,
+                                         headers={"authorization": f"Capability {self.capability}", **headers}, method="POST")
+        try:
+            urllib.request.urlopen(request, timeout=30)
+            raise PactrailError("x402 resource did not return a payment quote")
+        except urllib.error.HTTPError as quote:
+            if quote.code != 402:
+                raise PactrailError(f"Pactrail returned {quote.code}: {quote.read().decode()}") from quote
+            import base64
+            requirements = json.loads(base64.b64decode(quote.headers["payment-required"]).decode())
+        _, raw = self._request(
+            f"/payment-intents/{intent.request_id}/signer-approvals",
+            body={"signer_id": signer_id, "requirements": requirements,
+                  "body_sha256": hashlib.sha256(payload).hexdigest()},
+        )
+        return SignerApprovalRequest(**json.loads(raw))
 
     def pay_x402(self, intent: PaymentIntent, payload: bytes, signer: Callable[[dict[str, Any]], str],
                  *, protocol_headers: dict[str, str] | None = None) -> tuple[dict, dict]:
