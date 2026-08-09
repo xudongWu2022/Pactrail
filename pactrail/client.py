@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from spend_collector.capabilities import PaymentIntent
+from pactrail_core.capabilities import PaymentIntent
 
 
 class PactrailError(RuntimeError):

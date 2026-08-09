@@ -7,7 +7,7 @@ for CI and does not contact a provider, facilitator, wallet, or network.
 Run all checked-in scenarios:
 
 ```bash
-python3 -m spend_collector run-scenarios --path scenarios --out-dir artifacts
+python3 -m pactrail run-scenarios --path scenarios --out-dir artifacts
 ```
 
 The command writes `artifacts/scenario-report.json`. A non-zero exit means an

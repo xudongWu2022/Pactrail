@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spend_collector.gateway import _estimate_input_tokens, worst_case_amount
+from pactrail_core.gateway import _estimate_input_tokens, worst_case_amount
 
 
 _MSG = {"messages": [{"role": "user", "content": "hi there"}]}

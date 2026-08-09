@@ -6,7 +6,7 @@ data, so it does not expose provider keys, wallet keys, prompts, or real spend.
 1. Start the live experience (0:00-0:30).
 
    ```bash
-   python3 -m spend_collector demo-live --policy gateway.example.json
+   python3 -m pactrail demo-live --policy gateway.example.json
    ```
 
    Open `http://127.0.0.1:8787/dashboard?token=dev-gateway-token`.

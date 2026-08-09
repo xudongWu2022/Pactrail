@@ -10,9 +10,9 @@ cd "$(dirname "$0")/.."
 db="${SPEND_DB:-spend.db}"
 out_dir="${SPEND_OUT_DIR:-artifacts}"
 ran=0
-[ -n "${ANTHROPIC_ADMIN_KEY:-}" ] && { python3 -m spend_collector pull --db "$db" --out-dir "$out_dir"; ran=1; }
-[ -n "${X402_PAY_TO:-}" ]        && { python3 -m spend_collector pull-x402 --pay-to "$X402_PAY_TO" --db "$db" --out-dir "$out_dir"; ran=1; }
-{ [ -n "${STRIPE_SECRET_KEY:-}" ] || [ -n "${STRIPE_API_KEY:-}" ]; } && { python3 -m spend_collector pull-stripe --db "$db" --out-dir "$out_dir"; ran=1; }
+[ -n "${ANTHROPIC_ADMIN_KEY:-}" ] && { python3 -m pactrail pull --db "$db" --out-dir "$out_dir"; ran=1; }
+[ -n "${X402_PAY_TO:-}" ]        && { python3 -m pactrail pull-x402 --pay-to "$X402_PAY_TO" --db "$db" --out-dir "$out_dir"; ran=1; }
+{ [ -n "${STRIPE_SECRET_KEY:-}" ] || [ -n "${STRIPE_API_KEY:-}" ]; } && { python3 -m pactrail pull-stripe --db "$db" --out-dir "$out_dir"; ran=1; }
 
 if [ "$ran" = 0 ]; then
   echo "No creds set. Export one or more, then re-run:"
@@ -22,7 +22,7 @@ if [ "$ran" = 0 ]; then
   exit 1
 fi
 
-python3 -m spend_collector report --db "$db" --out-dir "$out_dir"
+python3 -m pactrail report --db "$db" --out-dir "$out_dir"
 # Open the dashboard (macOS: open, Linux: xdg-open).
 { command -v open >/dev/null && open "$out_dir/report.html"; } \
   || { command -v xdg-open >/dev/null && xdg-open "$out_dir/report.html"; } \

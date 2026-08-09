@@ -29,15 +29,14 @@ dependencies = []  # stdlib-only scaffold
 pricing = ["tokencost"]  # real/maintained model pricing (else the tiny static price book)
 
 [project.scripts]
-spend-collector = "spend_collector.__main__:main"
-pactrail = "spend_collector.__main__:main"
+pactrail = "pactrail_core.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["spend_collector", "pactrail"]
+packages = ["pactrail_core", "pactrail"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "fixtures" = "fixtures"
@@ -48,7 +47,7 @@ packages = ["spend_collector", "pactrail"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "spend_collector",
+  "pactrail_core",
   "fixtures",
   "tests",
   "docs",

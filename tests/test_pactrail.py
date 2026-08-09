@@ -10,9 +10,9 @@ import urllib.request
 import unittest
 from pathlib import Path
 
-from spend_collector.__main__ import make_gateway_server
-from spend_collector.capabilities import CapabilityError, mint_capability, verify_capability
-from spend_collector.x402_sandbox import make_x402_sandbox
+from pactrail_core.__main__ import make_gateway_server
+from pactrail_core.capabilities import CapabilityError, mint_capability, verify_capability
+from pactrail_core.x402_sandbox import make_x402_sandbox
 from pactrail import PactrailClient, PactrailError, PactrailSignerAdapter
 
 

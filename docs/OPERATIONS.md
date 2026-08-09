@@ -1,6 +1,6 @@
 # Operations
 
-`agent-spend-collector` is a read-only observer. It should run with restricted
+Pactrail provides the gateway and spend-observability control plane. It should run with restricted
 provider credentials, persist `spend.db`, and generate `report.html` after every
 pull.
 
@@ -21,9 +21,9 @@ pull.
 
    ```bash
    export SPEND_BUDGETS_FILE=budgets.json
-   python3 -m spend_collector pull --db spend.db --days 7 --out-dir artifacts
-   python3 -m spend_collector pull-stripe --db spend.db --days 7 --out-dir artifacts
-   python3 -m spend_collector pull-x402 --pay-to 0xYourReceivingAddress --db spend.db --out-dir artifacts
+   python3 -m pactrail pull --db spend.db --days 7 --out-dir artifacts
+   python3 -m pactrail pull-stripe --db spend.db --days 7 --out-dir artifacts
+   python3 -m pactrail pull-x402 --pay-to 0xYourReceivingAddress --db spend.db --out-dir artifacts
    ```
 
 4. Publish or archive these local artifacts:
@@ -58,9 +58,9 @@ Use the gateway when an agent can ask before spending. Start with
 
 ```bash
 export SPEND_POLICY_FILE=gateway.example.json
-python3 -m spend_collector validate-policy --policy "$SPEND_POLICY_FILE"
-python3 -m spend_collector audit-config --policy "$SPEND_POLICY_FILE"
-python3 -m spend_collector gateway --db spend.db --policy "$SPEND_POLICY_FILE"
+python3 -m pactrail validate-policy --policy "$SPEND_POLICY_FILE"
+python3 -m pactrail audit-config --policy "$SPEND_POLICY_FILE"
+python3 -m pactrail gateway --db spend.db --policy "$SPEND_POLICY_FILE"
 ```
 
 Agents or middleware call `POST /guard` before an LLM call, x402 payment, or
@@ -73,7 +73,7 @@ If denied, it returns JSON and does not call the destination.
 For shell-based integrations, use:
 
 ```bash
-python3 -m spend_collector guard \
+python3 -m pactrail guard \
   --policy gateway.example.json \
   --agent research-bot \
   --rail api_x402 \
@@ -104,7 +104,7 @@ and give agents only a gateway token:
 ```bash
 export OPENAI_API_KEY=sk-real-provider-key
 export SPEND_GATEWAY_TOKEN=dev-gateway-token
-python3 -m spend_collector gateway --db spend.db --policy gateway.example.json
+python3 -m pactrail gateway --db spend.db --policy gateway.example.json
 ```
 
 Then configure the agent SDK with:
@@ -123,7 +123,7 @@ short-lived budget holds in `spend_reservations`; release a hold if an allowed
 downstream call fails before money moves:
 
 ```bash
-python3 -m spend_collector release-reservation --db spend.db --request-id req_123
+python3 -m pactrail release-reservation --db spend.db --request-id req_123
 ```
 
 For LLM provider forwards the hold is the request's **worst-case** cost, not a flat
@@ -229,7 +229,7 @@ the open-source gateway.
 
 Two stronger interception controls:
 
-- **Kill-switch.** `python3 -m spend_collector freeze --policy p.json --agent rogue-bot`
+- **Kill-switch.** `python3 -m pactrail freeze --policy p.json --agent rogue-bot`
   (or `--budget`) adds it to the policy's `frozen_agents` / `frozen_budgets`; the
   running gateway reloads policy per request, so it denies immediately. `unfreeze`
   reverses it. Break-glass for an incident.

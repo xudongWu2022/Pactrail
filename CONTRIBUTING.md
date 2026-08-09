@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping build agent-spend-collector.
+Thanks for helping build Pactrail.
 
 ## Principles
 
@@ -17,9 +17,9 @@ Thanks for helping build agent-spend-collector.
 
 ```bash
 python3 -m unittest discover -s tests        # tests
-python3 -m compileall spend_collector tests  # compile
-python3 -m spend_collector demo              # product self-check
-python3 -m spend_collector run-scenarios     # payment/gateway incident records
+python3 -m compileall pactrail_core tests  # compile
+python3 -m pactrail demo              # product self-check
+python3 -m pactrail run-scenarios     # payment/gateway incident records
 ```
 
 CI runs the same across Python 3.10–3.12.

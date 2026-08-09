@@ -22,8 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pactrail import PactrailClient
-from spend_collector.__main__ import make_gateway_server
-from spend_collector.x402_sandbox import make_x402_sandbox
+from pactrail_core.__main__ import make_gateway_server
+from pactrail_core.x402_sandbox import make_x402_sandbox
 
 
 def _post(url: str, body: dict, authorization: str) -> dict:

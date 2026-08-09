@@ -1,6 +1,6 @@
 # Security
 
-`agent-spend-collector` is designed to be self-hosted by default. Provider keys
+Pactrail is designed to be self-hosted by default. Provider keys
 stay in the user's machine, server, VPC, or secret manager; the project does not
 depend on a hosted control plane.
 

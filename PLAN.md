@@ -1,11 +1,11 @@
-# PLAN — agent-spend-collector
+# PLAN — Pactrail
 
 "我在哪 + 下一步"的单一真相源。战略("为什么")在 SubChain docs(文末链接);本文件是**工作计划**。
 
 ## 现在在哪
 
 - ✅ **3 条真 rail** 进一本 FOCUS 账:LLM token(`pull`)· x402 Base USDC(`pull-x402`)· card/Stripe(`pull-stripe`)。
-- ✅ **Phase-0 检测器**(单 agent z-score 尖峰、预算燃烧率)+ HTML 报表;全有离线自检(`python3 -m spend_collector demo`)。
+- ✅ **Phase-0 检测器**(单 agent z-score 尖峰、预算燃烧率)+ HTML 报表;全有离线自检(`python3 -m pactrail_core demo`)。
 - ✅ 独立 repo,MIT,仍 **private**。
 - ✅ 定位 + 竞争已验证:开源 + 跨 rail(token+支付)+ spend-as-security + 只读 = **四交集无人占**。
 

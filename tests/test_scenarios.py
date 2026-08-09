@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spend_collector.__main__ import main
-from spend_collector.scenarios import run_scenario, run_scenarios
+from pactrail_core.__main__ import main
+from pactrail_core.scenarios import run_scenario, run_scenarios
 
 
 ROOT = Path(__file__).resolve().parent.parent

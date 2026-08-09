@@ -601,7 +601,7 @@ def pull(db_path: str | Path = "spend.db", out_dir: str | Path = ".", days: int 
         if not key:
             print("Set OPENAI_ADMIN_KEY to pull OpenAI cost data:\n"
                   "  export OPENAI_ADMIN_KEY=sk-...\n"
-                  "  python3 -m spend_collector pull --provider openai")
+                  "  python3 -m pactrail pull --provider openai")
             sys.exit(1)
         rows = fetch_openai_costs(key, days=days)
     else:
@@ -609,7 +609,7 @@ def pull(db_path: str | Path = "spend.db", out_dir: str | Path = ".", days: int 
         if not key:
             print("Set ANTHROPIC_ADMIN_KEY to pull real cost data:\n"
                   "  export ANTHROPIC_ADMIN_KEY=sk-ant-admin01-...\n"
-                  "  python3 -m spend_collector pull")
+                  "  python3 -m pactrail pull")
             sys.exit(1)
         rows = fetch_anthropic_cost_report(key, days=days)
     with SpendStore(str(db_path)) as store:
@@ -627,13 +627,13 @@ def pull_openrouter(db_path: str | Path = "spend.db", out_dir: str | Path = ".",
     if not key:
         print("Set OPENROUTER_API_KEY to pull OpenRouter generation metadata:\n"
               "  export OPENROUTER_API_KEY=sk-or-...\n"
-              "  python3 -m spend_collector pull-openrouter --generation-id gen_...")
+              "  python3 -m pactrail pull-openrouter --generation-id gen_...")
         sys.exit(1)
     ids = _load_id_list(generation_ids_file, generation_ids)
     if not ids:
         print("Pass at least one OpenRouter generation id:\n"
-              "  python3 -m spend_collector pull-openrouter --generation-id gen_...\n"
-              "  python3 -m spend_collector pull-openrouter --generation-ids-file generations.txt")
+              "  python3 -m pactrail pull-openrouter --generation-id gen_...\n"
+              "  python3 -m pactrail pull-openrouter --generation-ids-file generations.txt")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_openrouter_generation_rows(fetch_openrouter_generations(key, ids)))
@@ -654,7 +654,7 @@ def pull_aws(db_path: str | Path = "spend.db", out_dir: str | Path = ".", days: 
         print("Set AWS read-only Cost Explorer credentials:\n"
               "  export AWS_ACCESS_KEY_ID=...\n"
               "  export AWS_SECRET_ACCESS_KEY=...\n"
-              "  python3 -m spend_collector pull-aws")
+              "  python3 -m pactrail pull-aws")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_aws_cost_rows(fetch_aws_cost_and_usage(
@@ -677,7 +677,7 @@ def pull_gcp_billing_file(db_path: str | Path = "spend.db", out_dir: str | Path 
     from .sources import load_gcp_billing_export, from_gcp_billing_rows
     if not billing_export_file:
         print("Pass a GCP Billing Export file:\n"
-              "  python3 -m spend_collector pull-gcp-billing-file --billing-export-file gcp-billing.ndjson")
+              "  python3 -m pactrail pull-gcp-billing-file --billing-export-file gcp-billing.ndjson")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         rows = load_gcp_billing_export(billing_export_file)
@@ -709,14 +709,14 @@ def pull_azure(db_path: str | Path = "spend.db", out_dir: str | Path = ".", days
     if not scope:
         print("Set an Azure Cost Management scope:\n"
               "  export AZURE_COST_SCOPE=/subscriptions/00000000-0000-0000-0000-000000000000\n"
-              "  python3 -m spend_collector pull-azure --scope \"$AZURE_COST_SCOPE\"")
+              "  python3 -m pactrail pull-azure --scope \"$AZURE_COST_SCOPE\"")
         sys.exit(1)
     token = _azure_token_from_env_or_sp()
     if not token:
         print("Set Azure read-only Cost Management credentials:\n"
               "  export AZURE_ACCESS_TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)\n"
               "  # or set AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET for service principal auth\n"
-              "  python3 -m spend_collector pull-azure --scope \"$AZURE_COST_SCOPE\"")
+              "  python3 -m pactrail pull-azure --scope \"$AZURE_COST_SCOPE\"")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_azure_cost_rows(fetch_azure_cost_usage(
@@ -738,8 +738,8 @@ def pull_x402(db_path: str | Path = "spend.db", out_dir: str | Path = ".",
     pay_to = pay_to or env_pay_to()
     if not pay_to:
         print("Pass an x402 receiving address (Base USDC):\n"
-              "  X402_PAY_TO=0x... python3 -m spend_collector pull-x402\n"
-              "  python3 -m spend_collector pull-x402 --pay-to 0x...")
+              "  X402_PAY_TO=0x... python3 -m pactrail pull-x402\n"
+              "  python3 -m pactrail pull-x402 --pay-to 0x...")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_x402_settlements(
@@ -758,8 +758,8 @@ def pull_usdc(db_path: str | Path = "spend.db", out_dir: str | Path = ".",
     pay_to = pay_to or env_usdc_pay_to()
     if not pay_to:
         print("Pass a USDC receiving address on Base:\n"
-              "  USDC_PAY_TO=0x... python3 -m spend_collector pull-usdc\n"
-              "  python3 -m spend_collector pull-usdc --pay-to 0x...")
+              "  USDC_PAY_TO=0x... python3 -m pactrail pull-usdc\n"
+              "  python3 -m pactrail pull-usdc --pay-to 0x...")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_usdc_transfers(
@@ -778,7 +778,7 @@ def pull_stripe(db_path: str | Path = "spend.db", out_dir: str | Path = ".",
     if not key:
         print("Set STRIPE_SECRET_KEY (restricted read key) to pull card payments:\n"
               "  export STRIPE_SECRET_KEY=rk_live_...\n"
-              "  python3 -m spend_collector pull-stripe")
+              "  python3 -m pactrail pull-stripe")
         sys.exit(1)
     with SpendStore(str(db_path)) as store:
         n = store.ingest(from_stripe_events(fetch_stripe_payment_intent_events(key, days=days, limit=limit)))
@@ -2300,8 +2300,8 @@ def run_scenarios_cmd(path: str | Path = "scenarios", out_dir: str | Path = "art
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="spend-collector",
-        description="Read-only cross-rail agent spend collector.",
+        prog="pactrail",
+        description="Pactrail Gateway and spend observability CLI.",
     )
     parser.add_argument("--out-dir", default=".", help="directory for report.html and JSON artifacts")
     common = argparse.ArgumentParser(add_help=False)
